@@ -383,6 +383,7 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         choices=["success", "timeout", "malformed_history", "missing_view_payload", "connection_error"],
         default="success",
     )
+    parser.add_argument("--gui", action="store_true", help="Launch the PySide6 desktop GUI.")
     return parser
 
 
@@ -637,6 +638,12 @@ def main(argv: list[str] | None = None) -> None:
     project_root = Path(__file__).resolve().parents[2]
     parser = build_argument_parser(project_root)
     args = parser.parse_args(argv)
+
+    if args.gui:
+        from gui.app import launch_gui
+
+        raise SystemExit(launch_gui(project_root))
+
     config = AppConfig(
         project_root=project_root,
         comfyui_mode=args.comfyui_mode,

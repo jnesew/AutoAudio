@@ -88,7 +88,7 @@ Sprint 4 — Resume Engine (M)
 
         Depends on: task 10.
 
-Sprint 5 — GUI (PySide6) (L)
+Sprint 5 — GUI (PySide6) (L) ✅ Implemented
 
     [L] Build main window
 
