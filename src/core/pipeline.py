@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import logging
 import os
 import re
 import subprocess
+import traceback
 from pathlib import Path
 
 import ebooklib
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
-from comfyui.client import ComfyUIClient, ComfyUIClientError
+from comfyui.client import (
+    ComfyUIClient,
+    ComfyUIClientError,
+    ComfyUIConnectionError as ClientComfyUIConnectionError,
+    ComfyUIProtocolError as ClientComfyUIProtocolError,
+)
 from comfyui.real_client import RealComfyUIClient
 from comfyui.spoof_client import SpoofComfyUIClient
 from comfyui.workflow_loader import load_workflow_template
@@ -23,6 +30,16 @@ from core.checkpoint import (
     validate_artifact,
 )
 from core.config import AppConfig, GenerationSettings
+from core.errors import (
+    AudioStitchError,
+    ComfyUIConnectionError,
+    ComfyUIProtocolError,
+    InputValidationError,
+    MetadataExtractionError,
+    PipelineRuntimeError,
+    ResumeStateError,
+)
+from core.logging_utils import configure_run_logger
 from core.metadata_adapters import MetadataContext, adapter_for_extension
 from metadata.extractors import extract_epub_metadata, extract_text_fallback_metadata
 from metadata.source_mode import detect_source_mode
@@ -184,7 +201,7 @@ def get_audio_duration_ms(file_path: str) -> int:
         )
         return int(float(result.stdout.strip()) * 1000)
     except Exception as exc:
-        print(f"       [!] Warning: Could not get duration for {file_path} ({exc})")
+        logging.getLogger("autoaudio.run").warning("Could not get duration for %s (%s)", file_path, exc)
         return 0
 
 
@@ -205,9 +222,12 @@ def process_segment(
             timeout_seconds=config.comfyui_timeout_seconds,
         )
         return artifact.content, artifact.extension
+    except ClientComfyUIConnectionError as exc:
+        raise ComfyUIConnectionError(str(exc)) from exc
+    except ClientComfyUIProtocolError as exc:
+        raise ComfyUIProtocolError(str(exc)) from exc
     except ComfyUIClientError as exc:
-        print(f"       [!] ComfyUI Communication Error: {exc}")
-        return None, None
+        raise PipelineRuntimeError(f"ComfyUI request failed: {exc}") from exc
 
 
 def build_comfyui_client(config: AppConfig) -> ComfyUIClient:
@@ -275,8 +295,7 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception as exc:
-        print(f"       [!] Error during stitching: {exc}")
-        return False
+        raise AudioStitchError(f"Error during stitching: {exc}") from exc
     finally:
         try:
             if os.path.exists(list_file):
@@ -316,7 +335,7 @@ def extract_cover_art(epub_path: str, output_dir: str):
             return cover_path
 
     except Exception as exc:
-        print(f"   [Cover Art] Could not extract cover: {exc}")
+        logging.getLogger("autoaudio.run").warning("Cover art extraction failed: %s", exc)
 
     return None
 
@@ -327,8 +346,8 @@ def resolve_metadata(args: argparse.Namespace, input_book: str, source_mode: str
     if source_mode == "epub":
         try:
             embedded = extract_epub_metadata(input_book)
-        except Exception:
-            embedded = BookMetadata()
+        except Exception as exc:
+            raise MetadataExtractionError(f"Embedded EPUB metadata extraction failed for {input_book}: {exc}") from exc
         cover = extract_cover_art(input_book, output_dir)
         if cover:
             embedded = BookMetadata(**{**embedded.__dict__, "cover_image_path": cover})
@@ -343,7 +362,10 @@ def resolve_metadata(args: argparse.Namespace, input_book: str, source_mode: str
             or guess_gutenberg_id(os.path.basename(input_book))
         )
         if gutenberg_id:
-            fetched = fetch_gutenberg_metadata(gutenberg_id)
+            try:
+                fetched = fetch_gutenberg_metadata(gutenberg_id)
+            except Exception as exc:
+                raise MetadataExtractionError(f"Online metadata fetch failed for Gutenberg ID {gutenberg_id}: {exc}") from exc
             print(f"   [Metadata] Fetched metadata for Gutenberg ID {gutenberg_id}")
         else:
             print("   [Metadata] Fetch requested but no Gutenberg ID could be inferred.")
@@ -392,6 +414,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(config.state_dir, exist_ok=True)
+    logger, run_log_path = configure_run_logger(output_dir)
+    logger.info("Pipeline started for input=%s output=%s", input_book, output_dir)
 
     settings = GenerationSettings(
         max_words_per_chunk=args.max_words_per_chunk,
@@ -438,8 +462,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     )
 
     if args.resume == "yes" and not can_resume:
-        print("Resume requested (--resume yes) but no compatible checkpoint state exists.")
-        return
+        raise ResumeStateError("Resume requested (--resume yes) but no compatible checkpoint state exists.")
 
     if can_resume and args.resume in {"auto", "yes"}:
         print(f"[Resume] Loaded checkpoint at {checkpoint_store.path}")
@@ -472,8 +495,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     try:
         source_mode = detect_source_mode(input_book, args.source_mode)
     except ValueError as exc:
-        print(str(exc))
-        return
+        raise InputValidationError(str(exc)) from exc
 
     metadata = resolve_metadata(args, input_book, source_mode, output_dir)
 
@@ -489,8 +511,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         )
 
     if not chapters:
-        print("No chapters found. Please check the input file or format.")
-        return
+        raise InputValidationError("No chapters found. Check the input file content/format and chapter grouping settings.")
 
     part_index = 1
     part_chapter_files: list[tuple[str, str]] = []
@@ -555,7 +576,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                     checkpoint_store.save(checkpoint)
                     print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [OK]   ")
                 else:
-                    print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [FAILED] - Invalid Audio Data")
+                    raise ComfyUIProtocolError(
+                        f"Generated Segment {seg_idx + 1}/{len(chunks)} failed: ComfyUI returned invalid audio payload."
+                    )
 
             if not segment_files:
                 print("   -> Chapter failed (no audio generated).")
@@ -604,10 +627,25 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint_store.save(checkpoint)
     except Exception as exc:
         checkpoint["status"] = "failed"
-        checkpoint.setdefault("errors", []).append({"message": str(exc)})
+        checkpoint.setdefault("errors", []).append({"message": str(exc), "traceback": traceback.format_exc()})
         checkpoint_store.save(checkpoint)
-        raise
+        logger.exception("Pipeline failed")
+        if isinstance(
+            exc,
+            (
+                InputValidationError,
+                MetadataExtractionError,
+                ResumeStateError,
+                AudioStitchError,
+                ComfyUIConnectionError,
+                ComfyUIProtocolError,
+                PipelineRuntimeError,
+            ),
+        ):
+            raise
+        raise PipelineRuntimeError(f"Unexpected pipeline failure. See debug log: {run_log_path}") from exc
 
+    logger.info("Pipeline completed successfully")
     print("\nDone.")
 
 
@@ -651,4 +689,9 @@ def main(argv: list[str] | None = None) -> None:
         comfyui_timeout_seconds=args.comfyui_timeout_seconds,
         comfyui_spoof_scenario=args.comfyui_spoof_scenario,
     )
-    run_pipeline(args, config)
+    try:
+        run_pipeline(args, config)
+    except (InputValidationError, MetadataExtractionError, ResumeStateError, AudioStitchError, ComfyUIConnectionError, ComfyUIProtocolError, PipelineRuntimeError) as exc:
+        print(f"ERROR: [{exc.guidance.code}] {exc}")
+        print(f"REMEDIATION: {exc.remediation}")
+        raise SystemExit(exc.guidance.exit_code)

@@ -108,7 +108,7 @@ Sprint 5 — GUI (PySide6) (L) ✅ Implemented
 
         Depends on: task 10, 13.
 
-Sprint 6 — Error Handling + Docs (M)
+Sprint 6 — Error Handling + Docs (M) ✅ Implemented
 
     [M] Introduce typed exceptions + centralized logging
 
