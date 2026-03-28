@@ -1,40 +1,142 @@
 # AutoAudio
 
-## Python dependencies
+AutoAudio converts a book file (EPUB, TXT, Markdown, or RST) into chapter and part audiobook files using **ComfyUI + VibeVoice**.
 
-Install required Python packages before running the CLI:
+## What you need before running
+
+### 1) Python and dependencies
+
+Install project dependencies:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Current required libraries:
+### 2) System tools
 
-- `EbookLib` (EPUB parsing)
-- `beautifulsoup4` (HTML/text extraction from EPUB chapters)
-- `websocket-client` (ComfyUI websocket events)
+AutoAudio uses `ffmpeg` and `ffprobe` for stitching audio and writing metadata. Make sure both are installed and on your `PATH`.
 
-## Sprint 3 metadata system highlights
+### 3) ComfyUI runtime requirements (required for real generation)
 
-- Offline metadata extraction is the default behavior.
-  - EPUB: DC metadata fields (`title`, `creator`, `language`, etc.) + chapter structure.
-  - TXT/Markdown/RST: lightweight local header/front-matter heuristics.
-- Online metadata fetch is optional and disabled by default.
-  - Enable with `--fetch-metadata`.
-  - Merge precedence is: **user overrides > embedded metadata > fetched metadata > fallback values**.
-- Output format metadata adapters are container aware:
-  - **FLAC**: Vorbis-comment style tags (`title`, `artist`, `album`, `track`, `disc`).
-  - **MP3**: ID3v2-compatible mapping via ffmpeg metadata flags.
-  - **M4B**: MP4 atom-compatible tags and audiobook container output (`-f ipod`).
+AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 
-## New CLI metadata options
+- ComfyUI server reachable at `127.0.0.1:8188` by default (or set `--comfyui-server-address`)
+- The **VibeVoice Single Speaker** custom node available in ComfyUI (`VibeVoiceSingleSpeakerNode`)
+- A reference voice file available in ComfyUI's input files as `default_voice.wav`
+  - The bundled workflow `resources/workflows/vibevoice_single_speaker.json` loads this filename by default.
 
-- `--fetch-metadata` – attempt Gutenberg/Gutendex lookup.
-- `--gutenberg-id <id>` – explicit Gutenberg ID override.
-- `--title <value>` – user title override (highest precedence).
-- `--author <value>` – user author override (highest precedence).
-- `--output-format {flac,mp3,m4b}` – final chapter/part output format.
+> If you do not have a live ComfyUI runtime yet, you can still run pipeline logic with `--comfyui-mode spoof` for testing/development.
 
+## Quick usage flow
+
+1. Start ComfyUI and verify the VibeVoice node loads correctly.
+2. Put your reference voice clip in ComfyUI input files as `default_voice.wav`.
+3. Choose an input book (`.epub`, `.txt`, `.md`, `.markdown`, or `.rst`).
+4. Run AutoAudio from CLI or GUI.
+5. Collect generated chapter/part files from your output directory (default: `audiobook_output/`).
+
+## Run methods
+
+### CLI
+
+Basic run:
+
+```bash
+python auto_audiobook.py --input-book /path/to/book.epub --output-dir /path/to/output
+```
+
+Run with metadata fetch and MP3 output:
+
+```bash
+python auto_audiobook.py \
+  --input-book /path/to/book.epub \
+  --output-dir /path/to/output \
+  --fetch-metadata \
+  --output-format mp3
+```
+
+Resume a prior compatible run checkpoint:
+
+```bash
+python auto_audiobook.py --input-book /path/to/book.epub --output-dir /path/to/output --resume yes
+```
+
+### GUI
+
+Launch desktop app:
+
+```bash
+python auto_audiobook.py --gui
+```
+
+Notes:
+
+- GUI mode requires `PySide6` (already included in `requirements.txt`).
+- In GUI, pick input/output paths, optionally enable **Fetch metadata**, then click **Start**.
+- If a compatible checkpoint exists, the GUI enables **Resume** automatically.
+
+## CLI arguments
+
+### Input/output and source parsing
+
+- `--input-book <path>`: input book file path.
+- `--output-dir <path>`: output directory for generated files.
+- `--source-mode {auto,epub,text}`: force source parser mode.
+- `--pages-per-chapter <int>`: EPUB chapter grouping helper.
+- `--target-words-per-chapter <int>`: text chapter sizing target.
+- `--min-paragraphs-per-chapter <int>`: lower bound when grouping text chapters.
+- `--chapters-per-part <int>`: how many chapter files per final "part" file.
+
+### Generation tuning
+
+- `--max-words-per-chunk <int>`
+- `--diffusion-steps <int>`
+- `--temperature <float>`
+- `--top-p <float>`
+- `--cfg-scale <float>`
+- `--free-memory-after-generate` (flag)
+
+### Output and metadata
+
+- `--output-format {flac,mp3,m4b}`
+- `--fetch-metadata` (flag; optional online Gutenberg/Gutendex lookup)
+- `--gutenberg-id <id>` (manual Gutenberg ID override)
+- `--title <value>` (manual title override)
+- `--author <value>` (manual author override)
+
+Metadata precedence is:
+
+1. User overrides (`--title`, `--author`)
+2. Embedded source metadata
+3. Fetched online metadata (if enabled)
+4. Fallback defaults
+
+### ComfyUI connection/runtime controls
+
+- `--comfyui-mode {network,spoof}`
+- `--comfyui-server-address <host:port>`
+- `--comfyui-timeout-seconds <float>`
+- `--comfyui-spoof-scenario {success,timeout,malformed_history,missing_view_payload,connection_error}`
+
+### Run control
+
+- `--resume {auto,yes,no}`
+- `--gui` (launches desktop GUI instead of CLI pipeline run)
+
+## Outputs and run artifacts
+
+- Chapter files: `Chapter_###_<title>.<format>`
+- Part files: `<book title> - Part_###.<format>`
+- Segment cache: `<output-dir>/.segments/`
+- Run log: `<output-dir>/autoaudio_debug.log`
+- Resume checkpoint state: `resources/.autoaudio_state/checkpoint_state.json`
+
+## Troubleshooting
+
+- **Cannot connect to ComfyUI**: verify server is running and address matches `--comfyui-server-address`.
+- **No audio generated**: verify the VibeVoice node is installed and workflow-compatible.
+- **Missing reference voice**: ensure `default_voice.wav` exists in ComfyUI input files.
+- **Metadata fetch gives nothing**: this is optional; run without `--fetch-metadata` to stay fully offline.
 
 ## License
 
