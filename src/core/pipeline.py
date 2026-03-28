@@ -15,6 +15,12 @@ from comfyui.real_client import RealComfyUIClient
 from comfyui.spoof_client import SpoofComfyUIClient
 from comfyui.workflow_loader import load_workflow_template
 from core.config import AppConfig, GenerationSettings
+from core.metadata_adapters import MetadataContext, adapter_for_extension
+from metadata.extractors import extract_epub_metadata, extract_text_fallback_metadata
+from metadata.source_mode import detect_source_mode
+from metadata.gutenberg import fetch_gutenberg_metadata
+from metadata.id_utils import guess_gutenberg_id
+from metadata.models import BookMetadata, MetadataSources, merge_metadata
 
 
 def extract_text_blocks_from_epub(epub_path: str) -> list[tuple[str, str]]:
@@ -207,13 +213,23 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
     if not valid_files:
         return False
 
+    adapter = adapter_for_extension(output_filename)
+    context = MetadataContext(
+        title=(metadata or {}).get("title"),
+        artist=(metadata or {}).get("artist"),
+        album=(metadata or {}).get("album"),
+        track=(metadata or {}).get("track"),
+        disc=(metadata or {}).get("disc"),
+    )
+
     list_file = output_filename + ".concat.txt"
     meta_file = output_filename + ".ffmeta"
 
     try:
         with open(list_file, "w", encoding="utf-8") as file:
             for path in valid_files:
-                file.write(f"file '{path.replace("'", "'\\\\''")}'\n")
+                escaped_path = path.replace("'", "'\\''")
+                file.write(f"file '{escaped_path}'\n")
 
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file]
         input_idx = 1
@@ -238,17 +254,16 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
             cmd.extend(["-i", meta_file, "-map_metadata", str(input_idx)])
             input_idx += 1
 
-        elif metadata:
-            for key, value in metadata.items():
-                if value:
-                    cmd.extend(["-metadata", f"{key}={value}"])
+        cmd.extend(adapter.ffmpeg_metadata_args(context))
 
         if cover_image and os.path.exists(cover_image):
             cmd.extend(["-i", cover_image])
             cmd.extend(["-map", "0:a", "-map", f"{input_idx}:v"])
             cmd.extend(["-disposition:v", "attached_pic"])
 
-        cmd.extend(["-c", "copy", output_filename])
+        cmd.extend(adapter.ffmpeg_output_args())
+        cmd.append(output_filename)
+
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception as exc:
@@ -285,11 +300,8 @@ def extract_cover_art(epub_path: str, output_dir: str):
                     break
 
         if cover_item:
-            ext = os.path.splitext(cover_item.get_name())[1]
-            if not ext:
-                ext = ".jpg"
+            ext = os.path.splitext(cover_item.get_name())[1] or ".jpg"
             cover_path = os.path.join(output_dir, f"cover{ext}")
-
             with open(cover_path, "wb") as file:
                 file.write(cover_item.get_content())
             print(f"   [Cover Art] Extracted: {cover_path}")
@@ -299,6 +311,39 @@ def extract_cover_art(epub_path: str, output_dir: str):
         print(f"   [Cover Art] Could not extract cover: {exc}")
 
     return None
+
+
+def resolve_metadata(args: argparse.Namespace, input_book: str, source_mode: str, output_dir: str) -> BookMetadata:
+    fallback = BookMetadata(title=os.path.splitext(os.path.basename(input_book))[0], author="Unknown")
+
+    if source_mode == "epub":
+        try:
+            embedded = extract_epub_metadata(input_book)
+        except Exception:
+            embedded = BookMetadata()
+        cover = extract_cover_art(input_book, output_dir)
+        if cover:
+            embedded = BookMetadata(**{**embedded.__dict__, "cover_image_path": cover})
+    else:
+        embedded = extract_text_fallback_metadata(input_book)
+
+    fetched = BookMetadata()
+    if args.fetch_metadata:
+        gutenberg_id = (
+            guess_gutenberg_id(args.gutenberg_id)
+            or guess_gutenberg_id(embedded.identifier)
+            or guess_gutenberg_id(os.path.basename(input_book))
+        )
+        if gutenberg_id:
+            fetched = fetch_gutenberg_metadata(gutenberg_id)
+            print(f"   [Metadata] Fetched metadata for Gutenberg ID {gutenberg_id}")
+        else:
+            print("   [Metadata] Fetch requested but no Gutenberg ID could be inferred.")
+
+    user = BookMetadata(title=args.title, author=args.author)
+    merged = merge_metadata(MetadataSources(user=user, embedded=embedded, fetched=fetched, fallback=fallback))
+    print(f"   [Metadata] Title='{merged.title}' Author='{merged.author}' Language='{merged.language or 'unknown'}'")
+    return merged
 
 
 def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
@@ -316,6 +361,11 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--cfg-scale", type=float, default=1.3)
     parser.add_argument("--free-memory-after-generate", action="store_true")
+    parser.add_argument("--output-format", choices=["flac", "mp3", "m4b"], default="flac")
+    parser.add_argument("--fetch-metadata", action="store_true", help="Optional online metadata lookup (disabled by default).")
+    parser.add_argument("--gutenberg-id", default="", help="Optional explicit Gutenberg ID for online metadata fetch.")
+    parser.add_argument("--title", default="", help="Override audiobook title (highest metadata priority).")
+    parser.add_argument("--author", default="", help="Override audiobook author (highest metadata priority).")
     parser.add_argument("--comfyui-mode", choices=["network", "spoof"], default="network")
     parser.add_argument("--comfyui-server-address", default="127.0.0.1:8188")
     parser.add_argument("--comfyui-timeout-seconds", type=float, default=120.0)
@@ -345,38 +395,24 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     comfyui_client = build_comfyui_client(config)
 
     print(f"--- Processing Book: {input_book} ---")
+    try:
+        source_mode = detect_source_mode(input_book, args.source_mode)
+    except ValueError as exc:
+        print(str(exc))
+        return
 
-    ext = os.path.splitext(input_book)[1].lower()
-    global_album = os.path.splitext(os.path.basename(input_book))[0]
-    global_artist = "Unknown"
+    metadata = resolve_metadata(args, input_book, source_mode, output_dir)
 
-    if ext == ".epub":
-        try:
-            book = epub.read_epub(input_book)
-            title_meta = book.get_metadata("DC", "title")
-            if title_meta:
-                global_album = title_meta[0][0]
-            creator_meta = book.get_metadata("DC", "creator")
-            if creator_meta:
-                global_artist = creator_meta[0][0]
-            print(f"   [Metadata] Found - Title: '{global_album}', Author: '{global_artist}'")
-            extract_cover_art(input_book, output_dir)
-        except Exception:
-            print("   [Metadata] Could not read EPUB metadata, falling back to filename.")
-
-    if args.source_mode == "epub" or (args.source_mode == "auto" and ext == ".epub"):
+    if source_mode == "epub":
         blocks = extract_text_blocks_from_epub(input_book)
         chapters = group_blocks_into_chapters(blocks, args.pages_per_chapter)
-    elif args.source_mode == "text" or (args.source_mode == "auto" and ext in [".txt", ".md", ".markdown", ".rst"]):
+    else:
         blocks = extract_text_blocks_from_text_file(input_book)
         chapters = group_paragraphs_into_chapters(
             blocks,
             target_words_per_chapter=args.target_words_per_chapter,
             min_paragraphs_per_chapter=args.min_paragraphs_per_chapter,
         )
-    else:
-        print("Unsupported input type. Use --source-mode epub or --source-mode text.")
-        return
 
     if not chapters:
         print("No chapters found. Please check the input file or format.")
@@ -423,11 +459,16 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             continue
 
         safe_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
-        chapter_filename = os.path.join(output_dir, f"Chapter_{ch_idx + 1:03d}_{safe_title}.flac")
-        chapter_meta = {"title": title, "artist": global_artist, "album": global_album, "track": str(ch_idx + 1)}
+        chapter_filename = os.path.join(output_dir, f"Chapter_{ch_idx + 1:03d}_{safe_title}.{args.output_format}")
+        chapter_meta = {"title": title, "artist": metadata.author, "album": metadata.title, "track": str(ch_idx + 1)}
 
         print(f"   -> Stitching chapter to {chapter_filename}...")
-        if combine_audio_files(segment_files, chapter_filename, metadata=chapter_meta):
+        if combine_audio_files(
+            segment_files,
+            chapter_filename,
+            metadata=chapter_meta,
+            cover_image=metadata.cover_image_path,
+        ):
             part_chapter_files.append((chapter_filename, title))
 
         for filename in segment_files:
@@ -439,22 +480,22 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         print("   -> Chapter complete.")
 
         if len(part_chapter_files) >= args.chapters_per_part:
-            stitch_part(part_chapter_files, output_dir, global_album, global_artist, part_index)
+            stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format)
             part_index += 1
             part_chapter_files = []
 
     if part_chapter_files:
-        stitch_part(part_chapter_files, output_dir, global_album, global_artist, part_index)
+        stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format)
 
     print("\nDone.")
 
 
-def stitch_part(part_chapter_files, output_dir, global_album, global_artist, part_index):
-    part_filename = os.path.join(output_dir, f"{global_album} - Part_{part_index:03d}.flac")
+def stitch_part(part_chapter_files, output_dir, metadata: BookMetadata, part_index: int, output_format: str):
+    part_filename = os.path.join(output_dir, f"{metadata.title} - Part_{part_index:03d}.{output_format}")
     part_meta = {
-        "title": f"{global_album} - Part {part_index}",
-        "artist": global_artist,
-        "album": global_album,
+        "title": f"{metadata.title} - Part {part_index}",
+        "artist": metadata.author,
+        "album": metadata.title,
         "disc": str(part_index),
     }
 
@@ -462,7 +503,13 @@ def stitch_part(part_chapter_files, output_dir, global_album, global_artist, par
     titles_to_embed = [title for _, title in part_chapter_files]
 
     print(f"   -> Stitching {len(part_chapter_files)} chapters into {part_filename}...")
-    if combine_audio_files(files_to_stitch, part_filename, metadata=part_meta, chapter_titles=titles_to_embed):
+    if combine_audio_files(
+        files_to_stitch,
+        part_filename,
+        metadata=part_meta,
+        chapter_titles=titles_to_embed,
+        cover_image=metadata.cover_image_path,
+    ):
         print(f"   -> Part {part_index:03d} complete.")
 
 
