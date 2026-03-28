@@ -14,7 +14,7 @@ from ebooklib import epub
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_INPUT_BOOK = os.path.join(SCRIPT_DIR, "pg35-images-3.epub")
 DEFAULT_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "audiobook_output")
-REFERENCE_VOICE = "vw.wav"  # Must exist in ComfyUI/input/ folder
+REFERENCE_VOICE = "default_voice.wav"  # Must exist in ComfyUI/input/ folder
 COMFYUI_SERVER_ADDRESS = "127.0.0.1:8188"
 CLIENT_ID = str(uuid.uuid4())
 

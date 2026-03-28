@@ -1,0 +1,123 @@
+{
+  "schema_version": "1.0",
+  "job": {
+    "job_id": "string-uuid",
+    "created_at_utc": "2026-03-28T12:34:56Z",
+    "updated_at_utc": "2026-03-28T12:45:12Z",
+    "status": "running|paused|failed|completed|cancelled"
+  },
+  "input": {
+    "path": "/abs/path/book.epub",
+    "type": "epub|txt|md|markdown|rst",
+    "size_bytes": 0,
+    "mtime_epoch": 0,
+    "sha256": "hexstring"
+  },
+  "settings": {
+    "source_mode": "auto|epub|text",
+    "output_dir": "/abs/path/out",
+    "output_format": "flac|mp3|m4b|opus",
+    "chapters_per_part": 5,
+    "pages_per_chapter": 1,
+    "target_words_per_chapter": 2500,
+    "min_paragraphs_per_chapter": 3,
+    "max_words_per_chunk": 250,
+    "voice": {
+      "reference_voice": "default_voice.wav",
+      "diffusion_steps": 25,
+      "temperature": 0.95,
+      "top_p": 0.95,
+      "cfg_scale": 1.3,
+      "free_memory_after_generate": false
+    },
+    "network": {
+      "fetch_metadata_enabled": false,
+      "comfyui_mode": "real|spoof",
+      "comfyui_address": "127.0.0.1:8188"
+    },
+    "settings_hash": "hexstring"
+  },
+  "metadata": {
+    "title": "The Time Machine",
+    "creator": "H. G. Wells",
+    "language": "en",
+    "publisher": "Project Gutenberg",
+    "rights": "Public Domain",
+    "identifier": "35",
+    "subjects": ["Science fiction"],
+    "description": "optional",
+    "cover_image_path": "/abs/path/out/cover.jpg",
+    "source_priority": {
+      "title": "embedded|fetched|user|fallback",
+      "creator": "embedded|fetched|user|fallback"
+    }
+  },
+  "structure": {
+    "chapter_count": 0,
+    "chapters": [
+      {
+        "chapter_index": 1,
+        "title": "Chapter 1",
+        "text_hash": "hex",
+        "segments_total": 10,
+        "segments_completed": 5,
+        "status": "pending|running|completed|failed",
+        "started_at_utc": "2026-03-28T12:40:00Z",
+        "updated_at_utc": "2026-03-28T12:44:00Z"
+      }
+    ]
+  },
+  "artifacts": {
+    "segments": [
+      {
+        "chapter_index": 1,
+        "segment_index": 1,
+        "path": "/abs/path/out/temp_ch1_seg1.flac",
+        "bytes": 12345,
+        "sha256": "hex",
+        "status": "completed|missing|corrupt"
+      }
+    ],
+    "chapters": [
+      {
+        "chapter_index": 1,
+        "path": "/abs/path/out/Chapter_001_Intro.flac",
+        "status": "completed|missing|corrupt"
+      }
+    ],
+    "parts": [
+      {
+        "part_index": 1,
+        "path": "/abs/path/out/Book - Part_001.flac",
+        "status": "completed|missing|corrupt"
+      }
+    ]
+  },
+  "resume": {
+    "last_completed_chapter_index": 0,
+    "last_completed_segment_index": 0,
+    "next_chapter_index": 1,
+    "next_segment_index": 6,
+    "resume_reason": "app_closed|error|user_pause"
+  },
+  "errors": [
+    {
+      "time_utc": "2026-03-28T12:44:33Z",
+      "type": "ComfyUIConnectionError",
+      "message": "Timeout waiting for /history",
+      "chapter_index": 1,
+      "segment_index": 6,
+      "retryable": true
+    }
+  ],
+  "ui_state": {
+    "input_path": "/abs/path/book.epub",
+    "output_dir": "/abs/path/out",
+    "fetch_metadata_checked": false,
+    "selected_output_format": "flac",
+    "window": {
+      "width": 1280,
+      "height": 800
+    }
+  }
+}

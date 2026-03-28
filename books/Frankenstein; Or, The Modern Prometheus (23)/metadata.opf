@@ -1,0 +1,25 @@
+<?xml version='1.0' encoding='utf-8'?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="2.0">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+        <dc:identifier opf:scheme="calibre" id="calibre_id">23</dc:identifier>
+        <dc:identifier opf:scheme="uuid" id="uuid_id">af10d660-a81a-4461-8b52-ea5fdd57aa64</dc:identifier>
+        <dc:title>Frankenstein; Or, The Modern Prometheus</dc:title>
+        <dc:creator opf:file-as="Shelley, Mary Wollstonecraft" opf:role="aut">Mary Wollstonecraft Shelley</dc:creator>
+        <dc:contributor opf:file-as="calibre" opf:role="bkp">calibre (8.7.0) [https://calibre-ebook.com]</dc:contributor>
+        <dc:date>1993-10-02T00:00:00+00:00</dc:date>
+        <dc:language>eng</dc:language>
+        <dc:subject>Science fiction</dc:subject>
+        <dc:subject>Horror tales</dc:subject>
+        <dc:subject>Gothic fiction</dc:subject>
+        <dc:subject>Scientists -- Fiction</dc:subject>
+        <dc:subject>Monsters -- Fiction</dc:subject>
+        <dc:subject>Frankenstein</dc:subject>
+        <dc:subject>Victor (Fictitious character) -- Fiction</dc:subject>
+        <dc:subject>Frankenstein's monster (Fictitious character) -- Fiction</dc:subject>
+        <meta name="calibre:timestamp" content="2025-12-21T19:26:59+00:00"/>
+        <meta name="calibre:title_sort" content="Frankenstein; Or, The Modern Prometheus"/>
+    </metadata>
+    <guide>
+        <reference type="cover" title="Cover" href="cover.jpg"/>
+    </guide>
+</package>
