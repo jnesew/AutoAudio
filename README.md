@@ -34,3 +34,10 @@ Current required libraries:
 - `--title <value>` – user title override (highest precedence).
 - `--author <value>` – user author override (highest precedence).
 - `--output-format {flac,mp3,m4b}` – final chapter/part output format.
+
+
+## License
+
+AutoAudio source code is licensed under the MIT License. See `LICENSE`.
+
+Third-party dependencies are licensed under their own terms. See `THIRD_PARTY_DEPENDENCIES.md`.
