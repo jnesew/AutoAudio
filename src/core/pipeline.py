@@ -1,24 +1,20 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import subprocess
-import urllib.parse
-import urllib.request
-import uuid
 from pathlib import Path
 
 import ebooklib
-import websocket
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
-from comfyui.workflow_loader import build_runtime_workflow, load_workflow_template
+from comfyui.client import ComfyUIClient, ComfyUIClientError
+from comfyui.real_client import RealComfyUIClient
+from comfyui.spoof_client import SpoofComfyUIClient
+from comfyui.workflow_loader import load_workflow_template
 from core.config import AppConfig, GenerationSettings
-
-CLIENT_ID = str(uuid.uuid4())
 
 
 def extract_text_blocks_from_epub(epub_path: str) -> list[tuple[str, str]]:
@@ -154,25 +150,6 @@ def split_text_smart(text: str, max_words: int = 250) -> list[str]:
     return chunks
 
 
-def queue_prompt(prompt_workflow: dict, server_address: str) -> dict:
-    payload = {"prompt": prompt_workflow, "client_id": CLIENT_ID}
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(f"http://{server_address}/prompt", data=data)
-    return json.loads(urllib.request.urlopen(req).read())
-
-
-def get_history(prompt_id: str, server_address: str) -> dict:
-    with urllib.request.urlopen(f"http://{server_address}/history/{prompt_id}") as response:
-        return json.loads(response.read())
-
-
-def get_audio_data(filename: str, subfolder: str, folder_type: str, server_address: str) -> bytes:
-    data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
-    url_values = urllib.parse.urlencode(data)
-    with urllib.request.urlopen(f"http://{server_address}/view?{url_values}") as response:
-        return response.read()
-
-
 def get_audio_duration_ms(file_path: str) -> int:
     try:
         result = subprocess.run(
@@ -203,56 +180,26 @@ def process_segment(
     workflow_template: dict,
     settings: GenerationSettings,
     config: AppConfig,
+    comfyui_client: ComfyUIClient,
 ) -> tuple[bytes | None, str | None]:
-    workflow = build_runtime_workflow(
-        workflow_template=workflow_template,
-        text_segment=text_segment,
-        reference_voice=config.default_voice_filename,
-        settings=settings,
-    )
-
     try:
-        ws = websocket.WebSocket()
-        ws.connect(f"ws://{config.comfyui_server_address}/ws?clientId={CLIENT_ID}")
-
-        prompt_response = queue_prompt(workflow, config.comfyui_server_address)
-        prompt_id = prompt_response["prompt_id"]
-
-        while True:
-            out = ws.recv()
-            if isinstance(out, str):
-                message = json.loads(out)
-                if message.get("type") == "executing":
-                    data = message.get("data", {})
-                    if data.get("node") is None and data.get("prompt_id") == prompt_id:
-                        break
-
-        history = get_history(prompt_id, config.comfyui_server_address)[prompt_id]
-        outputs = history["outputs"]
-
-        audio_content = None
-        audio_ext = ".flac"
-
-        for node_id in outputs:
-            node_output = outputs[node_id]
-            if "audio" in node_output:
-                for audio_file in node_output["audio"]:
-                    audio_content = get_audio_data(
-                        audio_file["filename"],
-                        audio_file["subfolder"],
-                        audio_file["type"],
-                        config.comfyui_server_address,
-                    )
-                    _, ext = os.path.splitext(audio_file["filename"])
-                    if ext:
-                        audio_ext = ext.lower()
-
-        ws.close()
-        return audio_content, audio_ext
-
-    except Exception as exc:
+        artifact = comfyui_client.generate_audio(
+            workflow_template=workflow_template,
+            text_segment=text_segment,
+            reference_voice=config.default_voice_filename,
+            settings=settings,
+            timeout_seconds=config.comfyui_timeout_seconds,
+        )
+        return artifact.content, artifact.extension
+    except ComfyUIClientError as exc:
         print(f"       [!] ComfyUI Communication Error: {exc}")
         return None, None
+
+
+def build_comfyui_client(config: AppConfig) -> ComfyUIClient:
+    if config.comfyui_mode == "spoof":
+        return SpoofComfyUIClient(scenario=config.comfyui_spoof_scenario)
+    return RealComfyUIClient(server_address=config.comfyui_server_address)
 
 
 def combine_audio_files(audio_files, output_filename, metadata=None, chapter_titles=None, cover_image=None):
@@ -369,6 +316,14 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--cfg-scale", type=float, default=1.3)
     parser.add_argument("--free-memory-after-generate", action="store_true")
+    parser.add_argument("--comfyui-mode", choices=["network", "spoof"], default="network")
+    parser.add_argument("--comfyui-server-address", default="127.0.0.1:8188")
+    parser.add_argument("--comfyui-timeout-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--comfyui-spoof-scenario",
+        choices=["success", "timeout", "malformed_history", "missing_view_payload", "connection_error"],
+        default="success",
+    )
     return parser
 
 
@@ -387,6 +342,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         free_memory_after_generate=args.free_memory_after_generate,
     )
     workflow_template = load_workflow_template(config.workflow_path)
+    comfyui_client = build_comfyui_client(config)
 
     print(f"--- Processing Book: {input_book} ---")
 
@@ -449,6 +405,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 workflow_template=workflow_template,
                 settings=settings,
                 config=config,
+                comfyui_client=comfyui_client,
             )
 
             if audio_data and len(audio_data) > 16:
@@ -513,5 +470,11 @@ def main(argv: list[str] | None = None) -> None:
     project_root = Path(__file__).resolve().parents[2]
     parser = build_argument_parser(project_root)
     args = parser.parse_args(argv)
-    config = AppConfig(project_root=project_root)
+    config = AppConfig(
+        project_root=project_root,
+        comfyui_mode=args.comfyui_mode,
+        comfyui_server_address=args.comfyui_server_address,
+        comfyui_timeout_seconds=args.comfyui_timeout_seconds,
+        comfyui_spoof_scenario=args.comfyui_spoof_scenario,
+    )
     run_pipeline(args, config)
