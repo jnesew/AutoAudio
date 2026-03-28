@@ -9,6 +9,7 @@ from pathlib import Path
 
 from core.checkpoint import CheckpointStore
 from core.config import AppConfig
+from core.errors import format_user_error
 from core.pipeline import build_argument_parser, detect_source_mode, run_pipeline, resolve_metadata
 from gui.state import bool_from_ui_state, load_resume_context
 
@@ -88,7 +89,7 @@ def launch_gui(project_root: Path) -> int:
                 self.finished.emit(True, "Pipeline run completed.")
             except Exception as exc:  # noqa: BLE001
                 self.log_line.emit(traceback.format_exc())
-                self.finished.emit(False, str(exc))
+                self.finished.emit(False, format_user_error(exc))
 
     class MainWindow(QMainWindow):
         def __init__(self):
