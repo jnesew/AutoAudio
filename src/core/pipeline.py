@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
@@ -14,6 +15,13 @@ from comfyui.client import ComfyUIClient, ComfyUIClientError
 from comfyui.real_client import RealComfyUIClient
 from comfyui.spoof_client import SpoofComfyUIClient
 from comfyui.workflow_loader import load_workflow_template
+from core.checkpoint import (
+    CheckpointStore,
+    create_initial_checkpoint,
+    sha256_file,
+    stable_settings_hash,
+    validate_artifact,
+)
 from core.config import AppConfig, GenerationSettings
 from core.metadata_adapters import MetadataContext, adapter_for_extension
 from metadata.extractors import extract_epub_metadata, extract_text_fallback_metadata
@@ -369,6 +377,7 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--comfyui-mode", choices=["network", "spoof"], default="network")
     parser.add_argument("--comfyui-server-address", default="127.0.0.1:8188")
     parser.add_argument("--comfyui-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--resume", choices=["auto", "yes", "no"], default="auto")
     parser.add_argument(
         "--comfyui-spoof-scenario",
         choices=["success", "timeout", "malformed_history", "missing_view_payload", "connection_error"],
@@ -393,6 +402,70 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     )
     workflow_template = load_workflow_template(config.workflow_path)
     comfyui_client = build_comfyui_client(config)
+    checkpoint_store = CheckpointStore(state_dir=config.state_dir)
+    input_hash = sha256_file(input_book)
+    settings_hash = stable_settings_hash(
+        {
+            "source_mode": args.source_mode,
+            "pages_per_chapter": args.pages_per_chapter,
+            "target_words_per_chapter": args.target_words_per_chapter,
+            "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
+            "chapters_per_part": args.chapters_per_part,
+            "max_words_per_chunk": args.max_words_per_chunk,
+            "diffusion_steps": args.diffusion_steps,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "cfg_scale": args.cfg_scale,
+            "free_memory_after_generate": args.free_memory_after_generate,
+            "output_format": args.output_format,
+            "fetch_metadata": args.fetch_metadata,
+            "gutenberg_id": args.gutenberg_id,
+            "title": args.title,
+            "author": args.author,
+            "comfyui_mode": args.comfyui_mode,
+            "comfyui_server_address": args.comfyui_server_address,
+            "comfyui_timeout_seconds": args.comfyui_timeout_seconds,
+        }
+    )
+    checkpoint = checkpoint_store.load()
+    can_resume = (
+        checkpoint
+        and checkpoint.get("status") in {"running", "failed"}
+        and checkpoint.get("input", {}).get("sha256") == input_hash
+        and checkpoint.get("settings_hash") == settings_hash
+        and checkpoint.get("output", {}).get("dir") == output_dir
+    )
+
+    if args.resume == "yes" and not can_resume:
+        print("Resume requested (--resume yes) but no compatible checkpoint state exists.")
+        return
+
+    if can_resume and args.resume in {"auto", "yes"}:
+        print(f"[Resume] Loaded checkpoint at {checkpoint_store.path}")
+        checkpoint.setdefault("progress", {}).setdefault("completed_chapters", [])
+        checkpoint["progress"].setdefault("completed_segments", {})
+        checkpoint.setdefault("artifacts", {}).setdefault("segments", {})
+        checkpoint["artifacts"].setdefault("chapters", {})
+        checkpoint["artifacts"].setdefault("parts", {})
+        checkpoint.setdefault("errors", [])
+    else:
+        checkpoint = create_initial_checkpoint(
+            input_path=input_book,
+            input_hash=input_hash,
+            settings_hash=settings_hash,
+            output_dir=output_dir,
+            output_format=args.output_format,
+            ui_state={
+                "input_book": args.input_book,
+                "output_dir": args.output_dir,
+                "source_mode": args.source_mode,
+                "fetch_metadata": args.fetch_metadata,
+                "title": args.title,
+                "author": args.author,
+                "resume_mode": args.resume,
+            },
+        )
+        checkpoint_store.save(checkpoint)
 
     print(f"--- Processing Book: {input_book} ---")
     try:
@@ -420,72 +493,119 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
     part_index = 1
     part_chapter_files: list[tuple[str, str]] = []
+    segment_cache_dir = os.path.join(output_dir, ".segments")
+    os.makedirs(segment_cache_dir, exist_ok=True)
 
-    for ch_idx, (title, text) in enumerate(chapters):
-        print(f"\nProcessing {title}")
-        if "Project Gutenberg" in text[:500]:
-            print("   (Skipping likely Gutenberg preamble)")
-            continue
-
-        chunks = split_text_smart(text, max_words=args.max_words_per_chunk)
-        print(f"   -> Split into {len(chunks)} segments.")
-        segment_files = []
-
-        for seg_idx, chunk in enumerate(chunks):
-            if not chunk.strip():
+    try:
+        for ch_idx, (title, text) in enumerate(chapters):
+            chapter_key = str(ch_idx)
+            chapter_artifact = checkpoint.get("artifacts", {}).get("chapters", {}).get(chapter_key)
+            if chapter_artifact and validate_artifact(chapter_artifact.get("path", ""), chapter_artifact.get("sha256")):
+                print(f"\nProcessing {title}")
+                print("   -> Resume skip: chapter artifact passed integrity checks.")
+                part_chapter_files.append((chapter_artifact["path"], title))
                 continue
 
-            print(f"   -> Generating Segment {seg_idx + 1}/{len(chunks)}...", end="\r")
-            audio_data, audio_ext = process_segment(
-                text_segment=chunk,
-                workflow_template=workflow_template,
-                settings=settings,
-                config=config,
-                comfyui_client=comfyui_client,
-            )
+            print(f"\nProcessing {title}")
+            if "Project Gutenberg" in text[:500]:
+                print("   (Skipping likely Gutenberg preamble)")
+                continue
 
-            if audio_data and len(audio_data) > 16:
-                ext_to_use = audio_ext if audio_ext in [".wav", ".flac", ".mp3", ".opus"] else ".flac"
-                temp_filename = os.path.join(output_dir, f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}{ext_to_use}")
-                with open(temp_filename, "wb") as file:
-                    file.write(audio_data)
-                segment_files.append(temp_filename)
-                print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [OK]   ")
-            else:
-                print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [FAILED] - Invalid Audio Data")
+            chunks = split_text_smart(text, max_words=args.max_words_per_chunk)
+            print(f"   -> Split into {len(chunks)} segments.")
+            segment_files = []
+            segment_keys_for_chapter: list[str] = []
 
-        if not segment_files:
-            print("   -> Chapter failed (no audio generated).")
-            continue
+            for seg_idx, chunk in enumerate(chunks):
+                if not chunk.strip():
+                    continue
 
-        safe_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
-        chapter_filename = os.path.join(output_dir, f"Chapter_{ch_idx + 1:03d}_{safe_title}.{args.output_format}")
-        chapter_meta = {"title": title, "artist": metadata.author, "album": metadata.title, "track": str(ch_idx + 1)}
+                segment_key = f"{ch_idx}:{seg_idx}"
+                segment_artifact = checkpoint.get("artifacts", {}).get("segments", {}).get(segment_key)
+                if segment_artifact and validate_artifact(segment_artifact.get("path", ""), segment_artifact.get("sha256")):
+                    segment_files.append(segment_artifact["path"])
+                    segment_keys_for_chapter.append(segment_key)
+                    print(f"   -> Segment {seg_idx + 1}/{len(chunks)} resume hit [OK]")
+                    continue
 
-        print(f"   -> Stitching chapter to {chapter_filename}...")
-        if combine_audio_files(
-            segment_files,
-            chapter_filename,
-            metadata=chapter_meta,
-            cover_image=metadata.cover_image_path,
-        ):
-            part_chapter_files.append((chapter_filename, title))
+                print(f"   -> Generating Segment {seg_idx + 1}/{len(chunks)}...", end="\r")
+                audio_data, audio_ext = process_segment(
+                    text_segment=chunk,
+                    workflow_template=workflow_template,
+                    settings=settings,
+                    config=config,
+                    comfyui_client=comfyui_client,
+                )
 
-        for filename in segment_files:
-            try:
-                os.remove(filename)
-            except Exception:
-                pass
+                if audio_data and len(audio_data) > 16:
+                    ext_to_use = audio_ext if audio_ext in [".wav", ".flac", ".mp3", ".opus"] else ".flac"
+                    temp_filename = os.path.join(segment_cache_dir, f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}{ext_to_use}")
+                    with open(temp_filename, "wb") as file:
+                        file.write(audio_data)
+                    segment_files.append(temp_filename)
+                    segment_keys_for_chapter.append(segment_key)
+                    checkpoint["artifacts"]["segments"][segment_key] = {
+                        "path": temp_filename,
+                        "sha256": hashlib.sha256(audio_data).hexdigest(),
+                    }
+                    checkpoint["progress"]["completed_segments"].setdefault(chapter_key, [])
+                    if seg_idx not in checkpoint["progress"]["completed_segments"][chapter_key]:
+                        checkpoint["progress"]["completed_segments"][chapter_key].append(seg_idx)
+                    checkpoint_store.save(checkpoint)
+                    print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [OK]   ")
+                else:
+                    print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [FAILED] - Invalid Audio Data")
 
-        print("   -> Chapter complete.")
+            if not segment_files:
+                print("   -> Chapter failed (no audio generated).")
+                continue
 
-        if len(part_chapter_files) >= args.chapters_per_part:
+            safe_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
+            chapter_filename = os.path.join(output_dir, f"Chapter_{ch_idx + 1:03d}_{safe_title}.{args.output_format}")
+            chapter_meta = {"title": title, "artist": metadata.author, "album": metadata.title, "track": str(ch_idx + 1)}
+
+            print(f"   -> Stitching chapter to {chapter_filename}...")
+            if combine_audio_files(
+                segment_files,
+                chapter_filename,
+                metadata=chapter_meta,
+                cover_image=metadata.cover_image_path,
+            ):
+                part_chapter_files.append((chapter_filename, title))
+                checkpoint["artifacts"]["chapters"][chapter_key] = {
+                    "path": chapter_filename,
+                    "sha256": sha256_file(chapter_filename),
+                    "title": title,
+                }
+                if ch_idx not in checkpoint["progress"]["completed_chapters"]:
+                    checkpoint["progress"]["completed_chapters"].append(ch_idx)
+                checkpoint_store.save(checkpoint)
+
+            for segment_key, filename in zip(segment_keys_for_chapter, segment_files):
+                try:
+                    os.remove(filename)
+                except Exception:
+                    pass
+                checkpoint["artifacts"]["segments"].pop(segment_key, None)
+            checkpoint["progress"]["completed_segments"].pop(chapter_key, None)
+            checkpoint_store.save(checkpoint)
+
+            print("   -> Chapter complete.")
+
+            if len(part_chapter_files) >= args.chapters_per_part:
+                stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format)
+                part_index += 1
+                part_chapter_files = []
+
+        if part_chapter_files:
             stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format)
-            part_index += 1
-            part_chapter_files = []
-
-    if part_chapter_files:
-        stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format)
+        checkpoint["status"] = "completed"
+        checkpoint_store.save(checkpoint)
+    except Exception as exc:
+        checkpoint["status"] = "failed"
+        checkpoint.setdefault("errors", []).append({"message": str(exc)})
+        checkpoint_store.save(checkpoint)
+        raise
 
     print("\nDone.")
 
