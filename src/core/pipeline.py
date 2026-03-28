@@ -48,6 +48,41 @@ from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
 
 
+def _sanitize_ffmpeg_metadata_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    sanitized = re.sub(r"[\r\n]+", " ", value).strip()
+    return sanitized or None
+
+
+def _is_valid_cover_image(cover_image: str) -> bool:
+    if not os.path.exists(cover_image):
+        return False
+    try:
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                cover_image,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=True,
+        )
+        return True
+    except Exception:
+        logging.getLogger("autoaudio.run").warning("Invalid cover image detected; skipping attached cover: %s", cover_image)
+        return False
+
+
 def extract_text_blocks_from_epub(epub_path: str) -> list[tuple[str, str]]:
     if not os.path.exists(epub_path):
         print(f"ERROR: File not found: {epub_path}")
@@ -243,11 +278,11 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
 
     adapter = adapter_for_extension(output_filename)
     context = MetadataContext(
-        title=(metadata or {}).get("title"),
-        artist=(metadata or {}).get("artist"),
-        album=(metadata or {}).get("album"),
-        track=(metadata or {}).get("track"),
-        disc=(metadata or {}).get("disc"),
+        title=_sanitize_ffmpeg_metadata_value((metadata or {}).get("title")),
+        artist=_sanitize_ffmpeg_metadata_value((metadata or {}).get("artist")),
+        album=_sanitize_ffmpeg_metadata_value((metadata or {}).get("album")),
+        track=_sanitize_ffmpeg_metadata_value((metadata or {}).get("track")),
+        disc=_sanitize_ffmpeg_metadata_value((metadata or {}).get("disc")),
     )
 
     list_file = output_filename + ".concat.txt"
@@ -267,16 +302,16 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
                 file.write(";FFMETADATA1\n")
                 if metadata:
                     for key, value in metadata.items():
-                        if value:
-                            file.write(f"{key}={value}\n")
+                        sanitized_value = _sanitize_ffmpeg_metadata_value(value)
+                        if sanitized_value:
+                            file.write(f"{key}={sanitized_value}\n")
 
                 current_ms = 0
                 for i, path in enumerate(valid_files):
                     duration_ms = get_audio_duration_ms(path)
                     end_ms = current_ms + duration_ms
-                    file.write(
-                        f"\n[CHAPTER]\nTIMEBASE=1/1000\nSTART={current_ms}\nEND={end_ms}\ntitle={chapter_titles[i]}\n"
-                    )
+                    chapter_title = _sanitize_ffmpeg_metadata_value(chapter_titles[i]) or f"Chapter {i + 1}"
+                    file.write(f"\n[CHAPTER]\nTIMEBASE=1/1000\nSTART={current_ms}\nEND={end_ms}\ntitle={chapter_title}\n")
                     current_ms = end_ms
 
             cmd.extend(["-i", meta_file, "-map_metadata", str(input_idx)])
@@ -284,15 +319,31 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
 
         cmd.extend(adapter.ffmpeg_metadata_args(context))
 
-        if cover_image and os.path.exists(cover_image):
+        include_cover = bool(cover_image and _is_valid_cover_image(cover_image))
+        if include_cover:
             cmd.extend(["-i", cover_image])
             cmd.extend(["-map", "0:a", "-map", f"{input_idx}:v"])
             cmd.extend(["-disposition:v", "attached_pic"])
 
         cmd.extend(adapter.ffmpeg_output_args())
         cmd.append(output_filename)
-
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            if include_cover:
+                logging.getLogger("autoaudio.run").warning(
+                    "Stitching failed with attached cover; retrying without cover art for %s", output_filename
+                )
+                cmd_no_cover = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file]
+                input_idx_no_cover = 1
+                if chapter_titles and len(chapter_titles) == len(valid_files):
+                    cmd_no_cover.extend(["-i", meta_file, "-map_metadata", str(input_idx_no_cover)])
+                cmd_no_cover.extend(adapter.ffmpeg_metadata_args(context))
+                cmd_no_cover.extend(adapter.ffmpeg_output_args())
+                cmd_no_cover.append(output_filename)
+                subprocess.run(cmd_no_cover, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                raise
         return True
     except Exception as exc:
         raise AudioStitchError(f"Error during stitching: {exc}") from exc
