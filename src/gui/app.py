@@ -160,7 +160,7 @@ def launch_gui(project_root: Path) -> int:
             controls.addStretch(1)
 
             self.progress = QProgressBar()
-            self.progress.setRange(0, 1)
+            self.progress.setRange(0, 100)
             self.progress.setValue(0)
 
             self.log = QTextEdit()
@@ -224,9 +224,12 @@ def launch_gui(project_root: Path) -> int:
             self.start_btn.setEnabled(not running)
             self.resume_btn.setEnabled((not running) and self.resume_btn.isEnabled())
             self.cancel_btn.setEnabled(running)
-            if not running:
-                self.progress.setRange(0, 1)
-                self.progress.setValue(1)
+            if running:
+                self.progress.setRange(0, 100)
+                self.progress.setValue(0)
+            else:
+                self.progress.setRange(0, 100)
+                self.progress.setValue(100)
 
         def _collect_args(self, *, resume_mode: str) -> argparse.Namespace:
             args = self.parser.parse_args([])
