@@ -128,8 +128,14 @@ def launch_gui(project_root: Path) -> int:
             self.reference_voice_edit.editingFinished.connect(
                 lambda: self._on_reference_voice_changed(self.reference_voice_edit.text())
             )
+            self.reference_voice_edit.setToolTip(
+                "Uploads to ComfyUI as default_voice.wav (overwrites existing file with that name)."
+            )
             ref_btn = QPushButton("Browse…")
             ref_btn.clicked.connect(self._pick_reference_voice)
+            ref_btn.setToolTip("Uploads to ComfyUI as default_voice.wav.")
+            self.reference_voice_warning = QLabel("⚠️ Uploading reference voice overwrites ComfyUI input/default_voice.wav")
+            self.reference_voice_warning.setWordWrap(True)
 
             io_layout.addWidget(QLabel("Input file"), 0, 0)
             io_layout.addWidget(self.input_edit, 0, 1)
@@ -142,6 +148,7 @@ def launch_gui(project_root: Path) -> int:
             io_layout.addWidget(QLabel("Reference voice"), 2, 0)
             io_layout.addWidget(self.reference_voice_edit, 2, 1)
             io_layout.addWidget(ref_btn, 2, 2)
+            io_layout.addWidget(self.reference_voice_warning, 3, 1, 1, 2)
 
             options_group = QGroupBox("Options")
             options_layout = QHBoxLayout(options_group)

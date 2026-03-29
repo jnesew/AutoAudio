@@ -24,6 +24,7 @@ AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 - The **VibeVoice Single Speaker** custom node available in ComfyUI (`VibeVoiceSingleSpeakerNode`)
 - A reference voice file available in ComfyUI's input files as `default_voice.wav`
   - The bundled workflow `resources/workflows/vibevoice_single_speaker.json` loads this filename by default.
+  - ⚠️ If you use the GUI **Reference voice** uploader, ComfyUI will overwrite any existing `default_voice.wav` in its input directory.
 
 > If you do not have a live ComfyUI runtime yet, you can still run pipeline logic with `--comfyui-mode spoof` for testing/development.
 
@@ -73,6 +74,7 @@ Notes:
 
 - GUI mode requires `PySide6` (already included in `requirements.txt`).
 - In GUI, pick input/output paths, optionally enable **Fetch metadata**, then click **Start**.
+- The **Reference voice** picker uploads your file to ComfyUI as `default_voice.wav` and will overwrite any existing file with that name in ComfyUI input.
 - If a compatible checkpoint exists, the GUI enables **Resume** automatically.
 
 ## CLI arguments
