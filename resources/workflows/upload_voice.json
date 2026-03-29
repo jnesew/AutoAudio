@@ -1,0 +1,14 @@
+{
+    "1": {
+      "inputs": {
+        "audio": "input.wav"
+      },
+      "class_type": "LoadAudio"
+    },
+    "2": {
+      "inputs": {
+        "audio": ["1", 0]
+      },
+      "class_type": "PreviewAudio"
+    }
+  } 
