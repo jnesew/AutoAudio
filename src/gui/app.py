@@ -4,6 +4,8 @@ import argparse
 import contextlib
 import io
 import os
+import subprocess
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -250,8 +252,36 @@ def launch_gui(project_root: Path) -> int:
                 upload_workflow = load_workflow_template(config.workflows_dir / "upload_voice.json")
                 client = RealComfyUIClient(config.comfyui_server_address)
                 self._append_log(f"Uploading reference voice from: {normalized}")
+                upload_audio_path = normalized
+                temp_wav_path: str | None = None
+                if Path(normalized).suffix.lower() != ".wav":
+                    with tempfile.NamedTemporaryFile(prefix="autoaudio_voice_", suffix=".wav", delete=False) as temp_file:
+                        temp_wav_path = temp_file.name
+                    self._append_log("Converting reference voice to WAV for ComfyUI compatibility...")
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            normalized,
+                            "-vn",
+                            "-acodec",
+                            "pcm_s16le",
+                            "-ar",
+                            "44100",
+                            "-ac",
+                            "1",
+                            temp_wav_path,
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        check=True,
+                    )
+                    upload_audio_path = temp_wav_path
+
                 client.upload_reference_voice(
-                    file_path=normalized,
+                    file_path=upload_audio_path,
                     target_filename=config.default_voice_filename,
                     upload_workflow_template=upload_workflow,
                     timeout_seconds=config.comfyui_timeout_seconds,
@@ -259,6 +289,9 @@ def launch_gui(project_root: Path) -> int:
                 self._append_log("Reference voice uploaded as default_voice.wav.")
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.critical(self, "Upload failed", f"Failed to upload reference voice:\n{format_user_error(exc)}")
+            finally:
+                if "temp_wav_path" in locals() and temp_wav_path and os.path.exists(temp_wav_path):
+                    os.remove(temp_wav_path)
 
         def _on_input_changed(self, file_path: str):
             if not file_path or not os.path.exists(file_path):
