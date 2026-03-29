@@ -39,3 +39,13 @@ class ComfyUIClient(Protocol):
         timeout_seconds: float | None = None,
     ) -> AudioArtifact:
         """Generate audio for a text segment and return audio bytes + extension."""
+
+    def upload_reference_voice(
+        self,
+        *,
+        file_path: str,
+        target_filename: str,
+        upload_workflow_template: dict[str, Any],
+        timeout_seconds: float | None = None,
+    ) -> None:
+        """Upload a reference voice file and execute the upload workflow."""

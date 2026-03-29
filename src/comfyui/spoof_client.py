@@ -116,3 +116,15 @@ class SpoofComfyUIClient:
                 return AudioArtifact(content=content, extension=".flac")
 
         raise ComfyUIProtocolError("Spoof /history response missing audio payload")
+
+    def upload_reference_voice(
+        self,
+        *,
+        file_path: str,
+        target_filename: str,
+        upload_workflow_template: dict[str, Any],
+        timeout_seconds: float | None = None,
+    ) -> None:
+        del file_path, target_filename, upload_workflow_template, timeout_seconds
+        if self.endpoint.scenario == "connection_error":
+            raise ComfyUIConnectionError("Spoofed connection refused for /upload")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import urllib.parse
 import urllib.request
@@ -98,6 +99,45 @@ class RealComfyUIClient:
         except Exception as exc:
             raise ComfyUIConnectionError(f"Failed to download audio from ComfyUI: {exc}") from exc
 
+    def _upload_audio(self, *, file_path: str, target_filename: str) -> None:
+        boundary = f"----AutoAudioBoundary{uuid.uuid4().hex}"
+        mime_type = mimetypes.guess_type(target_filename)[0] or "application/octet-stream"
+        with open(file_path, "rb") as file:
+            file_bytes = file.read()
+
+        body = bytearray()
+
+        def add_field(name: str, value: str) -> None:
+            body.extend(f"--{boundary}\r\n".encode("utf-8"))
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+            body.extend(value.encode("utf-8"))
+            body.extend(b"\r\n")
+
+        add_field("type", "input")
+        add_field("overwrite", "true")
+
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            (
+                f'Content-Disposition: form-data; name="image"; filename="{target_filename}"\r\n'
+                f"Content-Type: {mime_type}\r\n\r\n"
+            ).encode("utf-8")
+        )
+        body.extend(file_bytes)
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+
+        request = urllib.request.Request(
+            f"http://{self.server_address}/upload/image",
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request).read()
+        except Exception as exc:
+            raise ComfyUIConnectionError(f"Failed to upload reference voice to ComfyUI: {exc}") from exc
+
     def generate_audio(
         self,
         *,
@@ -130,3 +170,23 @@ class RealComfyUIClient:
                 return AudioArtifact(content=content, extension=ext.lower() or ".flac")
 
         raise ComfyUIProtocolError("ComfyUI history did not include any audio outputs.")
+
+    def upload_reference_voice(
+        self,
+        *,
+        file_path: str,
+        target_filename: str,
+        upload_workflow_template: dict[str, Any],
+        timeout_seconds: float | None = 120,
+    ) -> None:
+        self._upload_audio(file_path=file_path, target_filename=target_filename)
+
+        workflow = dict(upload_workflow_template)
+        load_audio_node = dict(workflow.get("1", {}))
+        load_audio_inputs = dict(load_audio_node.get("inputs", {}))
+        load_audio_inputs["audio"] = target_filename
+        load_audio_node["inputs"] = load_audio_inputs
+        workflow["1"] = load_audio_node
+
+        prompt_id = self._queue_prompt(workflow)
+        self._wait_for_completion(prompt_id, timeout_seconds=timeout_seconds)

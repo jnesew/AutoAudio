@@ -4,9 +4,13 @@ import argparse
 import contextlib
 import io
 import os
+import subprocess
+import tempfile
 import traceback
 from pathlib import Path
 
+from comfyui.real_client import RealComfyUIClient
+from comfyui.workflow_loader import load_workflow_template
 from core.checkpoint import CheckpointStore
 from core.config import AppConfig
 from core.errors import format_user_error
@@ -121,6 +125,20 @@ def launch_gui(project_root: Path) -> int:
             out_btn = QPushButton("Browse…")
             out_btn.clicked.connect(self._pick_output_dir)
 
+            self.reference_voice_edit = FileDropLineEdit("")
+            self.reference_voice_edit.file_dropped.connect(self._on_reference_voice_changed)
+            self.reference_voice_edit.editingFinished.connect(
+                lambda: self._on_reference_voice_changed(self.reference_voice_edit.text())
+            )
+            self.reference_voice_edit.setToolTip(
+                "Uploads to ComfyUI as default_voice.wav (overwrites existing file with that name)."
+            )
+            ref_btn = QPushButton("Browse…")
+            ref_btn.clicked.connect(self._pick_reference_voice)
+            ref_btn.setToolTip("Uploads to ComfyUI as default_voice.wav.")
+            self.reference_voice_warning = QLabel("⚠️ Uploading reference voice overwrites ComfyUI input/default_voice.wav")
+            self.reference_voice_warning.setWordWrap(True)
+
             io_layout.addWidget(QLabel("Input file"), 0, 0)
             io_layout.addWidget(self.input_edit, 0, 1)
             io_layout.addWidget(in_btn, 0, 2)
@@ -128,6 +146,11 @@ def launch_gui(project_root: Path) -> int:
             io_layout.addWidget(QLabel("Output directory"), 1, 0)
             io_layout.addWidget(self.output_edit, 1, 1)
             io_layout.addWidget(out_btn, 1, 2)
+
+            io_layout.addWidget(QLabel("Reference voice"), 2, 0)
+            io_layout.addWidget(self.reference_voice_edit, 2, 1)
+            io_layout.addWidget(ref_btn, 2, 2)
+            io_layout.addWidget(self.reference_voice_warning, 3, 1, 1, 2)
 
             options_group = QGroupBox("Options")
             options_layout = QHBoxLayout(options_group)
@@ -195,6 +218,80 @@ def launch_gui(project_root: Path) -> int:
             )
             if dir_path:
                 self.output_edit.setText(dir_path)
+
+        def _pick_reference_voice(self):
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select reference voice audio",
+                self.reference_voice_edit.text() or str(self.project_root),
+                (
+                    "Audio files (*.wav *.mp3 *.flac *.m4a *.ogg *.aac *.aif *.aiff *.wma);;"
+                    "All files (*.*)"
+                ),
+            )
+            if file_path:
+                self.reference_voice_edit.setText(file_path)
+                self._on_reference_voice_changed(file_path)
+
+        def _on_reference_voice_changed(self, file_path: str):
+            normalized = file_path.strip()
+            if not normalized:
+                return
+
+            if not os.path.isfile(normalized):
+                QMessageBox.warning(self, "Invalid audio", "Please select a valid reference voice audio file.")
+                return
+
+            args = self._collect_args(resume_mode="auto")
+            if args.comfyui_mode != "network":
+                self._append_log("Reference voice upload is only available in network ComfyUI mode.")
+                return
+
+            try:
+                config = self._build_config(args)
+                upload_workflow = load_workflow_template(config.workflows_dir / "upload_voice.json")
+                client = RealComfyUIClient(config.comfyui_server_address)
+                self._append_log(f"Uploading reference voice from: {normalized}")
+                upload_audio_path = normalized
+                temp_wav_path: str | None = None
+                if Path(normalized).suffix.lower() != ".wav":
+                    with tempfile.NamedTemporaryFile(prefix="autoaudio_voice_", suffix=".wav", delete=False) as temp_file:
+                        temp_wav_path = temp_file.name
+                    self._append_log("Converting reference voice to WAV for ComfyUI compatibility...")
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            normalized,
+                            "-vn",
+                            "-acodec",
+                            "pcm_s16le",
+                            "-ar",
+                            "44100",
+                            "-ac",
+                            "1",
+                            temp_wav_path,
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        check=True,
+                    )
+                    upload_audio_path = temp_wav_path
+
+                client.upload_reference_voice(
+                    file_path=upload_audio_path,
+                    target_filename=config.default_voice_filename,
+                    upload_workflow_template=upload_workflow,
+                    timeout_seconds=config.comfyui_timeout_seconds,
+                )
+                self._append_log("Reference voice uploaded as default_voice.wav.")
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(self, "Upload failed", f"Failed to upload reference voice:\n{format_user_error(exc)}")
+            finally:
+                if "temp_wav_path" in locals() and temp_wav_path and os.path.exists(temp_wav_path):
+                    os.remove(temp_wav_path)
 
         def _on_input_changed(self, file_path: str):
             if not file_path or not os.path.exists(file_path):
