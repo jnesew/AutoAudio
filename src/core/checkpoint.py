@@ -94,6 +94,7 @@ def create_initial_checkpoint(
             "segments": {},
             "chapters": {},
             "parts": {},
+            "provenance": {},
         },
         "errors": [],
         "ui_state": ui_state,

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from provenance.c2pa import ProvenanceConfig
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -18,6 +20,7 @@ class AppConfig:
     comfyui_server_address: str = "127.0.0.1:8188"
     comfyui_timeout_seconds: float = 120.0
     comfyui_spoof_scenario: str = "success"
+    provenance: ProvenanceConfig = field(default_factory=ProvenanceConfig)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "resource_dir", self.project_root / "resources")
