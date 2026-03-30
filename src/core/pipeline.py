@@ -46,6 +46,7 @@ from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
+from provenance.c2pa import ProvenanceConfig, ProvenanceRuntimeMetadata, apply_c2pa_with_policy, parse_model_identity_version
 
 
 def _sanitize_ffmpeg_metadata_value(value: str | None) -> str | None:
@@ -271,6 +272,40 @@ def build_comfyui_client(config: AppConfig) -> ComfyUIClient:
     return RealComfyUIClient(server_address=config.comfyui_server_address)
 
 
+def _extract_provenance_runtime_metadata(workflow_template: dict) -> ProvenanceRuntimeMetadata:
+    backend_name = "unknown-backend"
+    backend_version = "unknown"
+    model_identity = ""
+    model_version = ""
+
+    for node in workflow_template.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        inputs = node.get("inputs", {})
+        if not backend_name or backend_name == "unknown-backend":
+            if class_type:
+                backend_name = str(class_type)
+        if isinstance(inputs, dict) and not model_identity:
+            model_value = inputs.get("model")
+            if isinstance(model_value, str) and model_value.strip():
+                model_identity, model_version = parse_model_identity_version(model_value.strip())
+        meta = node.get("_meta", {})
+        title = meta.get("title") if isinstance(meta, dict) else None
+        if isinstance(title, str) and title.strip() and backend_version == "unknown":
+            backend_version = title.strip()
+
+    software_version = os.environ.get("AUTOAUDIO_VERSION", "dev")
+    return ProvenanceRuntimeMetadata(
+        model_name=model_identity or "unknown-model",
+        model_version=model_version or "unknown",
+        backend_name=backend_name,
+        backend_version=backend_version,
+        software_name="AutoAudio",
+        software_version=software_version,
+    )
+
+
 def combine_audio_files(audio_files, output_filename, metadata=None, chapter_titles=None, cover_image=None):
     valid_files = [path for path in audio_files if os.path.exists(path)]
     if not valid_files:
@@ -451,6 +486,18 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--comfyui-server-address", default="127.0.0.1:8188")
     parser.add_argument("--comfyui-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--resume", choices=["auto", "yes", "no"], default="auto")
+    parser.add_argument("--provenance-enabled", action="store_true", help="Enable C2PA signing and embedding.")
+    parser.add_argument("--provenance-cert-path", default="", help="Path to X.509 certificate for C2PA signing.")
+    parser.add_argument("--provenance-key-path", default="", help="Path to private key for C2PA signing.")
+    parser.add_argument("--provenance-key-password", default="", help="Optional password for the provenance private key.")
+    parser.add_argument(
+        "--provenance-failure-mode",
+        choices=["soft-fail", "hard-fail"],
+        default="soft-fail",
+        help="When hard-fail, provenance errors stop the pipeline; soft-fail logs warning and continues.",
+    )
+    parser.add_argument("--provenance-tool", default="c2patool", help="CLI tool used for C2PA embedding/signing.")
+    parser.add_argument("--provenance-claim-generator", default="autoaudio", help="claim_generator value used in C2PA.")
     parser.add_argument(
         "--comfyui-spoof-scenario",
         choices=["success", "timeout", "malformed_history", "missing_view_payload", "connection_error"],
@@ -477,6 +524,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         free_memory_after_generate=args.free_memory_after_generate,
     )
     workflow_template = load_workflow_template(config.workflow_path)
+    provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template)
     comfyui_client = build_comfyui_client(config)
     checkpoint_store = CheckpointStore(state_dir=config.state_dir)
     input_hash = sha256_file(input_book)
@@ -501,6 +549,12 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "comfyui_mode": args.comfyui_mode,
             "comfyui_server_address": args.comfyui_server_address,
             "comfyui_timeout_seconds": args.comfyui_timeout_seconds,
+            "provenance_enabled": args.provenance_enabled,
+            "provenance_cert_path": args.provenance_cert_path,
+            "provenance_key_path": args.provenance_key_path,
+            "provenance_failure_mode": args.provenance_failure_mode,
+            "provenance_tool": args.provenance_tool,
+            "provenance_claim_generator": args.provenance_claim_generator,
         }
     )
     checkpoint = checkpoint_store.load()
@@ -522,6 +576,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint.setdefault("artifacts", {}).setdefault("segments", {})
         checkpoint["artifacts"].setdefault("chapters", {})
         checkpoint["artifacts"].setdefault("parts", {})
+        checkpoint["artifacts"].setdefault("provenance", {})
         checkpoint.setdefault("errors", [])
     else:
         checkpoint = create_initial_checkpoint(
@@ -646,12 +701,26 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 metadata=chapter_meta,
                 cover_image=metadata.cover_image_path,
             ):
+                provenance = apply_c2pa_with_policy(
+                    artifact_path=chapter_filename,
+                    config=config.provenance,
+                    runtime_metadata=provenance_runtime_metadata,
+                    logger=logger,
+                )
                 part_chapter_files.append((chapter_filename, title))
                 checkpoint["artifacts"]["chapters"][chapter_key] = {
                     "path": chapter_filename,
                     "sha256": sha256_file(chapter_filename),
                     "title": title,
                 }
+                if provenance:
+                    checkpoint["artifacts"]["provenance"][chapter_filename] = {
+                        "manifest_id": provenance.manifest_id,
+                        "embedding_path": provenance.embedding_path,
+                    }
+                    logger.info(
+                        "Checkpointed C2PA manifest artifact=%s manifest_id=%s", chapter_filename, provenance.manifest_id
+                    )
                 if ch_idx not in checkpoint["progress"]["completed_chapters"]:
                     checkpoint["progress"]["completed_chapters"].append(ch_idx)
                 checkpoint_store.save(checkpoint)
@@ -668,12 +737,34 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             print("   -> Chapter complete.")
 
             if len(part_chapter_files) >= args.chapters_per_part:
-                stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format)
+                stitch_part(
+                    part_chapter_files,
+                    output_dir,
+                    metadata,
+                    part_index,
+                    args.output_format,
+                    checkpoint,
+                    checkpoint_store,
+                    config,
+                    provenance_runtime_metadata,
+                    logger,
+                )
                 part_index += 1
                 part_chapter_files = []
 
         if part_chapter_files:
-            stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format)
+            stitch_part(
+                part_chapter_files,
+                output_dir,
+                metadata,
+                part_index,
+                args.output_format,
+                checkpoint,
+                checkpoint_store,
+                config,
+                provenance_runtime_metadata,
+                logger,
+            )
         checkpoint["status"] = "completed"
         checkpoint_store.save(checkpoint)
     except Exception as exc:
@@ -700,7 +791,18 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     print("\nDone.")
 
 
-def stitch_part(part_chapter_files, output_dir, metadata: BookMetadata, part_index: int, output_format: str):
+def stitch_part(
+    part_chapter_files,
+    output_dir,
+    metadata: BookMetadata,
+    part_index: int,
+    output_format: str,
+    checkpoint: dict,
+    checkpoint_store: CheckpointStore,
+    config: AppConfig,
+    provenance_runtime_metadata: ProvenanceRuntimeMetadata,
+    logger: logging.Logger,
+):
     part_filename = os.path.join(output_dir, f"{metadata.title} - Part_{part_index:03d}.{output_format}")
     part_meta = {
         "title": f"{metadata.title} - Part {part_index}",
@@ -720,6 +822,24 @@ def stitch_part(part_chapter_files, output_dir, metadata: BookMetadata, part_ind
         chapter_titles=titles_to_embed,
         cover_image=metadata.cover_image_path,
     ):
+        provenance = apply_c2pa_with_policy(
+            artifact_path=part_filename,
+            config=config.provenance,
+            runtime_metadata=provenance_runtime_metadata,
+            logger=logger,
+        )
+        checkpoint["artifacts"]["parts"][str(part_index)] = {
+            "path": part_filename,
+            "sha256": sha256_file(part_filename),
+            "title": f"{metadata.title} - Part {part_index}",
+        }
+        if provenance:
+            checkpoint["artifacts"]["provenance"][part_filename] = {
+                "manifest_id": provenance.manifest_id,
+                "embedding_path": provenance.embedding_path,
+            }
+            logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", part_filename, provenance.manifest_id)
+        checkpoint_store.save(checkpoint)
         print(f"   -> Part {part_index:03d} complete.")
 
 
@@ -739,6 +859,15 @@ def main(argv: list[str] | None = None) -> None:
         comfyui_server_address=args.comfyui_server_address,
         comfyui_timeout_seconds=args.comfyui_timeout_seconds,
         comfyui_spoof_scenario=args.comfyui_spoof_scenario,
+        provenance=ProvenanceConfig(
+            enabled=args.provenance_enabled,
+            cert_path=args.provenance_cert_path,
+            key_path=args.provenance_key_path,
+            key_password=args.provenance_key_password,
+            hard_fail=args.provenance_failure_mode == "hard-fail",
+            tool=args.provenance_tool,
+            claim_generator=args.provenance_claim_generator,
+        ),
     )
     try:
         run_pipeline(args, config)
