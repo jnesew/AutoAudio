@@ -64,7 +64,7 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
 
     for key, expected in AI_TAGS.items():
         actual = tags.get(key)
-        if actual is None or actual.lower() != expected:
+        if actual is None or actual.lower() != expected.lower():
             errors.append(f"metadata tag mismatch for {artifact.name}: {key}={actual!r}, expected {expected!r}")
 
     if not tags.get("ai_marking", ""):

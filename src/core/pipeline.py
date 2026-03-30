@@ -76,6 +76,7 @@ def _write_ai_marking_manifest(
     artifact_path: str,
     *,
     content_id: str,
+    metadata_embedded: bool,
     watermark_applied: bool,
     watermark_verified: bool,
     watermark_detail: str,
@@ -90,7 +91,7 @@ def _write_ai_marking_manifest(
         "provider": "ComfyUI",
         "content_id": content_id,
         "marking_methods": {
-            "metadata": True,
+            "metadata": metadata_embedded,
             "audio_watermark": {
                 "applied": watermark_applied,
                 "verified": watermark_verified,
@@ -161,8 +162,14 @@ def _embed_ai_marking_metadata_inplace(artifact_path: str, logger: logging.Logge
             return False
 
 
-def _apply_ai_marking_to_artifact(artifact_path: str, *, content_id: str, logger: logging.Logger) -> None:
-    _embed_ai_marking_metadata_inplace(artifact_path, logger=logger)
+def _apply_ai_marking_to_artifact(
+    artifact_path: str,
+    *,
+    content_id: str,
+    logger: logging.Logger,
+    require_success: bool = True,
+) -> None:
+    metadata_embedded = _embed_ai_marking_metadata_inplace(artifact_path, logger=logger)
     watermark_result = watermark_audio_output_best_effort(
         artifact_path,
         content_id=content_id,
@@ -171,10 +178,21 @@ def _apply_ai_marking_to_artifact(artifact_path: str, *, content_id: str, logger
     _write_ai_marking_manifest(
         artifact_path,
         content_id=content_id,
+        metadata_embedded=metadata_embedded,
         watermark_applied=watermark_result.applied,
         watermark_verified=watermark_result.verified,
         watermark_detail=watermark_result.detail,
     )
+    if require_success and (
+        not metadata_embedded or not watermark_result.applied or not watermark_result.verified
+    ):
+        raise RuntimeError(
+            "AI marking failed strict checks: "
+            f"metadata_embedded={metadata_embedded}, "
+            f"watermark_applied={watermark_result.applied}, "
+            f"watermark_verified={watermark_result.verified}, "
+            f"detail={watermark_result.detail}"
+        )
 
 
 def _is_valid_cover_image(cover_image: str) -> bool:
@@ -443,6 +461,7 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
 
     list_file = output_filename + ".concat.txt"
     meta_file = output_filename + ".ffmeta"
+    pending_output = output_filename + ".pending"
 
     try:
         with open(list_file, "w", encoding="utf-8") as file:
@@ -483,7 +502,7 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
             cmd.extend(["-disposition:v", "attached_pic"])
 
         cmd.extend(adapter.ffmpeg_output_args())
-        cmd.append(output_filename)
+        cmd.append(pending_output)
         try:
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
@@ -498,19 +517,35 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
                 cmd_no_cover.extend(adapter.ffmpeg_metadata_args(context))
                 cmd_no_cover.extend(_ai_marking_metadata_args())
                 cmd_no_cover.extend(adapter.ffmpeg_output_args())
-                cmd_no_cover.append(output_filename)
+                cmd_no_cover.append(pending_output)
                 subprocess.run(cmd_no_cover, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 raise
 
         content_id = (metadata or {}).get("title") or Path(output_filename).name
         _apply_ai_marking_to_artifact(
-            output_filename,
+            pending_output,
             content_id=content_id,
             logger=logging.getLogger("autoaudio.run"),
         )
+        os.replace(pending_output, output_filename)
+        pending_manifest = Path(pending_output).with_suffix(f"{Path(pending_output).suffix}.ai.json")
+        final_manifest = Path(output_filename).with_suffix(f"{Path(output_filename).suffix}.ai.json")
+        if pending_manifest.exists():
+            os.replace(pending_manifest, final_manifest)
         return True
     except Exception as exc:
+        if os.path.exists(pending_output):
+            try:
+                os.remove(pending_output)
+            except Exception:
+                pass
+        pending_manifest = Path(pending_output).with_suffix(f"{Path(pending_output).suffix}.ai.json")
+        if pending_manifest.exists():
+            try:
+                pending_manifest.unlink()
+            except Exception:
+                pass
         raise AudioStitchError(f"Error during stitching: {exc}") from exc
     finally:
         try:
@@ -798,15 +833,21 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 if audio_data and len(audio_data) > 16:
                     ext_to_use = audio_ext if audio_ext in [".wav", ".flac", ".mp3", ".opus"] else ".flac"
                     temp_filename = os.path.join(segment_cache_dir, f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}{ext_to_use}")
-                    with open(temp_filename, "wb") as file:
+                    pending_temp_filename = f"{temp_filename}.pending"
+                    with open(pending_temp_filename, "wb") as file:
                         file.write(audio_data)
                     segment_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
                     segment_content_id = f"{segment_title}_seg_{seg_idx + 1:03d}"
                     _apply_ai_marking_to_artifact(
-                        temp_filename,
+                        pending_temp_filename,
                         content_id=segment_content_id,
                         logger=logger,
                     )
+                    os.replace(pending_temp_filename, temp_filename)
+                    pending_manifest = Path(pending_temp_filename).with_suffix(f"{Path(pending_temp_filename).suffix}.ai.json")
+                    final_manifest = Path(temp_filename).with_suffix(f"{Path(temp_filename).suffix}.ai.json")
+                    if pending_manifest.exists():
+                        os.replace(pending_manifest, final_manifest)
                     segment_files.append(temp_filename)
                     segment_keys_for_chapter.append(segment_key)
                     checkpoint["artifacts"]["segments"][segment_key] = {

@@ -5,6 +5,7 @@ import sys
 import types
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -54,6 +55,8 @@ def test_combine_audio_files_retries_without_cover(tmp_path):
             return subprocess.CompletedProcess(cmd, 0, stdout="mjpeg\n")
         if "-disposition:v" in cmd:
             raise subprocess.CalledProcessError(returncode=234, cmd=cmd)
+        if cmd[0] == "ffmpeg":
+            Path(cmd[-1]).write_bytes(b"out")
         return subprocess.CompletedProcess(cmd, 0)
 
     with patch("core.pipeline._apply_ai_marking_to_artifact") as apply_marking_mock, patch(
@@ -86,7 +89,8 @@ def test_apply_ai_marking_to_artifact_writes_manifest_even_when_metadata_tagging
             verified=True,
             detail="ok_default_public_key",
         )
-        _apply_ai_marking_to_artifact(str(artifact), content_id="segment_001", logger=types.SimpleNamespace())
+        with pytest.raises(RuntimeError, match="AI marking failed strict checks"):
+            _apply_ai_marking_to_artifact(str(artifact), content_id="segment_001", logger=types.SimpleNamespace())
 
     manifest_path = artifact.with_suffix(".flac.ai.json")
     assert manifest_path.exists()
