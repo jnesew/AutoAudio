@@ -31,7 +31,7 @@ if "websocket" not in sys.modules:
     websocket_module.WebSocket = object
     sys.modules["websocket"] = websocket_module
 
-from core.pipeline import _sanitize_ffmpeg_metadata_value, combine_audio_files
+from core.pipeline import _apply_ai_marking_to_artifact, _sanitize_ffmpeg_metadata_value, combine_audio_files
 
 
 def test_sanitize_ffmpeg_metadata_value_removes_newlines():
@@ -56,16 +56,37 @@ def test_combine_audio_files_retries_without_cover(tmp_path):
             raise subprocess.CalledProcessError(returncode=234, cmd=cmd)
         return subprocess.CompletedProcess(cmd, 0)
 
-    with patch("core.pipeline.subprocess.run", side_effect=fake_run):
+    with patch("core.pipeline._apply_ai_marking_to_artifact") as apply_marking_mock, patch(
+        "core.pipeline.subprocess.run", side_effect=fake_run
+    ):
         assert combine_audio_files(
             [str(segment)],
             str(output),
             metadata={"title": "Chapter 2: I.\nIntroduction"},
             cover_image=str(cover),
         )
+    apply_marking_mock.assert_called_once()
 
     ffmpeg_calls = [call for call in calls if call and call[0] == "ffmpeg"]
     assert len(ffmpeg_calls) == 2
     assert "-disposition:v" in ffmpeg_calls[0]
     assert "-disposition:v" not in ffmpeg_calls[1]
     assert "title=Chapter 2: I. Introduction" in ffmpeg_calls[1]
+
+
+def test_apply_ai_marking_to_artifact_writes_manifest_even_when_metadata_tagging_fails(tmp_path):
+    artifact = tmp_path / "segment.flac"
+    artifact.write_bytes(b"audio")
+
+    with patch("core.pipeline._embed_ai_marking_metadata_inplace", return_value=False), patch(
+        "core.pipeline.watermark_audio_output_best_effort"
+    ) as watermark_mock:
+        watermark_mock.return_value = types.SimpleNamespace(
+            applied=True,
+            verified=True,
+            detail="ok_default_public_key",
+        )
+        _apply_ai_marking_to_artifact(str(artifact), content_id="segment_001", logger=types.SimpleNamespace())
+
+    manifest_path = artifact.with_suffix(".flac.ai.json")
+    assert manifest_path.exists()

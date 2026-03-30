@@ -163,6 +163,18 @@ AutoAudio validates required assertion fields before signing and raises explicit
 - Run log: `<output-dir>/autoaudio_debug.log`
 - Resume checkpoint state: `resources/.autoaudio_state/checkpoint_state.json`
 
+### Verify AI marking and watermarking
+
+After generation, verify that segment and stitched outputs contain AI metadata tags,
+watermark status manifests, and machine-readable marking sidecars:
+
+```bash
+python scripts/verify.py --output-dir "<output-dir>" --include-segments
+```
+
+The command exits with a non-zero status if any artifact is missing `ai_*` tags,
+missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not applied/verified.
+
 ## Troubleshooting
 
 - **Cannot connect to ComfyUI**: verify server is running and address matches `--comfyui-server-address`.

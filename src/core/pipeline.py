@@ -103,6 +103,80 @@ def _write_ai_marking_manifest(
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _metadata_tagging_audio_codec_args(artifact_path: Path) -> list[str]:
+    suffix = artifact_path.suffix.lower()
+    if suffix == ".flac":
+        return ["-c:a", "flac"]
+    if suffix == ".mp3":
+        return ["-c:a", "libmp3lame"]
+    if suffix == ".opus":
+        return ["-c:a", "libopus"]
+    if suffix in {".m4b", ".m4a", ".mp4"}:
+        return ["-c:a", "aac"]
+    if suffix == ".wav":
+        return ["-c:a", "pcm_s16le"]
+    return ["-c:a", "copy"]
+
+
+def _embed_ai_marking_metadata_inplace(artifact_path: str, logger: logging.Logger | None = None) -> bool:
+    log = logger or logging.getLogger("autoaudio.run")
+    source = Path(artifact_path)
+    if not source.exists():
+        return False
+
+    temp_output = source.with_name(f"{source.stem}.ai_marked{source.suffix}")
+    copy_cmd = ["ffmpeg", "-y", "-i", str(source), "-map", "0", "-c", "copy"]
+    copy_cmd.extend(_ai_marking_metadata_args())
+    copy_cmd.append(str(temp_output))
+
+    def _cleanup_temp() -> None:
+        if temp_output.exists():
+            try:
+                temp_output.unlink()
+            except Exception:
+                pass
+
+    try:
+        subprocess.run(copy_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.replace(temp_output, source)
+        return True
+    except Exception as copy_exc:
+        _cleanup_temp()
+        transcode_cmd = ["ffmpeg", "-y", "-i", str(source)]
+        transcode_cmd.extend(_metadata_tagging_audio_codec_args(source))
+        transcode_cmd.extend(_ai_marking_metadata_args())
+        transcode_cmd.append(str(temp_output))
+        try:
+            subprocess.run(transcode_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.replace(temp_output, source)
+            log.warning(
+                "AI metadata tagging required re-encode for %s after stream-copy failed (%s)",
+                artifact_path,
+                copy_exc,
+            )
+            return True
+        except Exception as transcode_exc:
+            _cleanup_temp()
+            log.warning("AI metadata tagging skipped for %s (%s)", artifact_path, transcode_exc)
+            return False
+
+
+def _apply_ai_marking_to_artifact(artifact_path: str, *, content_id: str, logger: logging.Logger) -> None:
+    _embed_ai_marking_metadata_inplace(artifact_path, logger=logger)
+    watermark_result = watermark_audio_output_best_effort(
+        artifact_path,
+        content_id=content_id,
+        logger=logger,
+    )
+    _write_ai_marking_manifest(
+        artifact_path,
+        content_id=content_id,
+        watermark_applied=watermark_result.applied,
+        watermark_verified=watermark_result.verified,
+        watermark_detail=watermark_result.detail,
+    )
+
+
 def _is_valid_cover_image(cover_image: str) -> bool:
     if not os.path.exists(cover_image):
         return False
@@ -430,17 +504,10 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
                 raise
 
         content_id = (metadata or {}).get("title") or Path(output_filename).name
-        watermark_result = watermark_audio_output_best_effort(
+        _apply_ai_marking_to_artifact(
             output_filename,
             content_id=content_id,
             logger=logging.getLogger("autoaudio.run"),
-        )
-        _write_ai_marking_manifest(
-            output_filename,
-            content_id=content_id,
-            watermark_applied=watermark_result.applied,
-            watermark_verified=watermark_result.verified,
-            watermark_detail=watermark_result.detail,
         )
         return True
     except Exception as exc:
@@ -733,11 +800,18 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                     temp_filename = os.path.join(segment_cache_dir, f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}{ext_to_use}")
                     with open(temp_filename, "wb") as file:
                         file.write(audio_data)
+                    segment_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
+                    segment_content_id = f"{segment_title}_seg_{seg_idx + 1:03d}"
+                    _apply_ai_marking_to_artifact(
+                        temp_filename,
+                        content_id=segment_content_id,
+                        logger=logger,
+                    )
                     segment_files.append(temp_filename)
                     segment_keys_for_chapter.append(segment_key)
                     checkpoint["artifacts"]["segments"][segment_key] = {
                         "path": temp_filename,
-                        "sha256": hashlib.sha256(audio_data).hexdigest(),
+                        "sha256": sha256_file(temp_filename),
                     }
                     checkpoint["progress"]["completed_segments"].setdefault(chapter_key, [])
                     if seg_idx not in checkpoint["progress"]["completed_segments"][chapter_key]:
