@@ -22,9 +22,14 @@ AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 
 - ComfyUI server reachable at `127.0.0.1:8188` by default (or set `--comfyui-server-address`)
 - The **VibeVoice Single Speaker** custom node available in ComfyUI (`VibeVoiceSingleSpeakerNode`)
-- A reference voice file available in ComfyUI's input files as `default_voice.wav`
+- https://huggingface.co/microsoft/VibeVoice-1.5B. Includes both audible and invisible watermarks for compliance.
+    - Other models or variants are not supported.
+  - Audible watermarks are at the start of every clip. To decrease their frequency, increase chunk size.
+   
+- A reference voice file available in ComfyUI's input files as `default_voice.wav`(uploadable via GUI)
   - The bundled workflow `resources/workflows/vibevoice_single_speaker.json` loads this filename by default.
   - ⚠️ If you use the GUI **Reference voice** uploader, ComfyUI will overwrite any existing `default_voice.wav` in its input directory.
+    - Ensure you have rights to use any reference voice used for voice styling in your jurisdiction  
 
 > If you do not have a live ComfyUI runtime yet, you can still run pipeline logic with `--comfyui-mode spoof` for testing/development.
 
