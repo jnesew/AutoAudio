@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import os
 import re
 import subprocess
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 import ebooklib
@@ -46,6 +48,7 @@ from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
+from provenance.audio_watermark import watermark_audio_output_best_effort
 from provenance.c2pa import ProvenanceConfig, ProvenanceRuntimeMetadata, apply_c2pa_with_policy, parse_model_identity_version
 
 
@@ -54,6 +57,50 @@ def _sanitize_ffmpeg_metadata_value(value: str | None) -> str | None:
         return None
     sanitized = re.sub(r"[\r\n]+", " ", value).strip()
     return sanitized or None
+
+
+def _ai_marking_metadata_args() -> list[str]:
+    return [
+        "-metadata",
+        "ai_generated=true",
+        "-metadata",
+        "ai_system=AutoAudio",
+        "-metadata",
+        "ai_provider=ComfyUI",
+        "-metadata",
+        "ai_marking=audio_watermark+metadata+manifest",
+    ]
+
+
+def _write_ai_marking_manifest(
+    artifact_path: str,
+    *,
+    content_id: str,
+    watermark_applied: bool,
+    watermark_verified: bool,
+    watermark_detail: str,
+) -> None:
+    artifact = Path(artifact_path)
+    payload = {
+        "schema": "autoaudio.ai_marking.v1",
+        "artifact": artifact.name,
+        "artifact_sha256": sha256_file(str(artifact)) if artifact.exists() else "",
+        "ai_generated": True,
+        "ai_system": "AutoAudio",
+        "provider": "ComfyUI",
+        "content_id": content_id,
+        "marking_methods": {
+            "metadata": True,
+            "audio_watermark": {
+                "applied": watermark_applied,
+                "verified": watermark_verified,
+                "detail": watermark_detail,
+            },
+        },
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    manifest_path = artifact.with_suffix(f"{artifact.suffix}.ai.json")
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _is_valid_cover_image(cover_image: str) -> bool:
@@ -353,6 +400,7 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
             input_idx += 1
 
         cmd.extend(adapter.ffmpeg_metadata_args(context))
+        cmd.extend(_ai_marking_metadata_args())
 
         include_cover = bool(cover_image and _is_valid_cover_image(cover_image))
         if include_cover:
@@ -374,11 +422,26 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
                 if chapter_titles and len(chapter_titles) == len(valid_files):
                     cmd_no_cover.extend(["-i", meta_file, "-map_metadata", str(input_idx_no_cover)])
                 cmd_no_cover.extend(adapter.ffmpeg_metadata_args(context))
+                cmd_no_cover.extend(_ai_marking_metadata_args())
                 cmd_no_cover.extend(adapter.ffmpeg_output_args())
                 cmd_no_cover.append(output_filename)
                 subprocess.run(cmd_no_cover, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 raise
+
+        content_id = (metadata or {}).get("title") or Path(output_filename).name
+        watermark_result = watermark_audio_output_best_effort(
+            output_filename,
+            content_id=content_id,
+            logger=logging.getLogger("autoaudio.run"),
+        )
+        _write_ai_marking_manifest(
+            output_filename,
+            content_id=content_id,
+            watermark_applied=watermark_result.applied,
+            watermark_verified=watermark_result.verified,
+            watermark_detail=watermark_result.detail,
+        )
         return True
     except Exception as exc:
         raise AudioStitchError(f"Error during stitching: {exc}") from exc
