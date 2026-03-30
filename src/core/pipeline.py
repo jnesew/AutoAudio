@@ -46,7 +46,7 @@ from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
-from provenance.c2pa import ProvenanceConfig, apply_c2pa_with_policy
+from provenance.c2pa import ProvenanceConfig, ProvenanceRuntimeMetadata, apply_c2pa_with_policy, parse_model_identity_version
 
 
 def _sanitize_ffmpeg_metadata_value(value: str | None) -> str | None:
@@ -272,6 +272,40 @@ def build_comfyui_client(config: AppConfig) -> ComfyUIClient:
     return RealComfyUIClient(server_address=config.comfyui_server_address)
 
 
+def _extract_provenance_runtime_metadata(workflow_template: dict) -> ProvenanceRuntimeMetadata:
+    backend_name = "unknown-backend"
+    backend_version = "unknown"
+    model_identity = ""
+    model_version = ""
+
+    for node in workflow_template.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        inputs = node.get("inputs", {})
+        if not backend_name or backend_name == "unknown-backend":
+            if class_type:
+                backend_name = str(class_type)
+        if isinstance(inputs, dict) and not model_identity:
+            model_value = inputs.get("model")
+            if isinstance(model_value, str) and model_value.strip():
+                model_identity, model_version = parse_model_identity_version(model_value.strip())
+        meta = node.get("_meta", {})
+        title = meta.get("title") if isinstance(meta, dict) else None
+        if isinstance(title, str) and title.strip() and backend_version == "unknown":
+            backend_version = title.strip()
+
+    software_version = os.environ.get("AUTOAUDIO_VERSION", "dev")
+    return ProvenanceRuntimeMetadata(
+        model_name=model_identity or "unknown-model",
+        model_version=model_version or "unknown",
+        backend_name=backend_name,
+        backend_version=backend_version,
+        software_name="AutoAudio",
+        software_version=software_version,
+    )
+
+
 def combine_audio_files(audio_files, output_filename, metadata=None, chapter_titles=None, cover_image=None):
     valid_files = [path for path in audio_files if os.path.exists(path)]
     if not valid_files:
@@ -490,6 +524,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         free_memory_after_generate=args.free_memory_after_generate,
     )
     workflow_template = load_workflow_template(config.workflow_path)
+    provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template)
     comfyui_client = build_comfyui_client(config)
     checkpoint_store = CheckpointStore(state_dir=config.state_dir)
     input_hash = sha256_file(input_book)
@@ -666,7 +701,12 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 metadata=chapter_meta,
                 cover_image=metadata.cover_image_path,
             ):
-                provenance = apply_c2pa_with_policy(artifact_path=chapter_filename, config=config.provenance, logger=logger)
+                provenance = apply_c2pa_with_policy(
+                    artifact_path=chapter_filename,
+                    config=config.provenance,
+                    runtime_metadata=provenance_runtime_metadata,
+                    logger=logger,
+                )
                 part_chapter_files.append((chapter_filename, title))
                 checkpoint["artifacts"]["chapters"][chapter_key] = {
                     "path": chapter_filename,
@@ -697,12 +737,34 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             print("   -> Chapter complete.")
 
             if len(part_chapter_files) >= args.chapters_per_part:
-                stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format, checkpoint, checkpoint_store, config, logger)
+                stitch_part(
+                    part_chapter_files,
+                    output_dir,
+                    metadata,
+                    part_index,
+                    args.output_format,
+                    checkpoint,
+                    checkpoint_store,
+                    config,
+                    provenance_runtime_metadata,
+                    logger,
+                )
                 part_index += 1
                 part_chapter_files = []
 
         if part_chapter_files:
-            stitch_part(part_chapter_files, output_dir, metadata, part_index, args.output_format, checkpoint, checkpoint_store, config, logger)
+            stitch_part(
+                part_chapter_files,
+                output_dir,
+                metadata,
+                part_index,
+                args.output_format,
+                checkpoint,
+                checkpoint_store,
+                config,
+                provenance_runtime_metadata,
+                logger,
+            )
         checkpoint["status"] = "completed"
         checkpoint_store.save(checkpoint)
     except Exception as exc:
@@ -738,6 +800,7 @@ def stitch_part(
     checkpoint: dict,
     checkpoint_store: CheckpointStore,
     config: AppConfig,
+    provenance_runtime_metadata: ProvenanceRuntimeMetadata,
     logger: logging.Logger,
 ):
     part_filename = os.path.join(output_dir, f"{metadata.title} - Part_{part_index:03d}.{output_format}")
@@ -759,7 +822,12 @@ def stitch_part(
         chapter_titles=titles_to_embed,
         cover_image=metadata.cover_image_path,
     ):
-        provenance = apply_c2pa_with_policy(artifact_path=part_filename, config=config.provenance, logger=logger)
+        provenance = apply_c2pa_with_policy(
+            artifact_path=part_filename,
+            config=config.provenance,
+            runtime_metadata=provenance_runtime_metadata,
+            logger=logger,
+        )
         checkpoint["artifacts"]["parts"][str(part_index)] = {
             "path": part_filename,
             "sha256": sha256_file(part_filename),

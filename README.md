@@ -130,6 +130,31 @@ Metadata precedence is:
 - `--resume {auto,yes,no}`
 - `--gui` (launches desktop GUI instead of CLI pipeline run)
 
+### Provenance / C2PA controls
+
+- `--provenance-enabled` enables post-processing provenance signing/embedding after each final chapter and part artifact is written.
+- `--provenance-cert-path <path>` points to the X.509 signing certificate used by the C2PA toolchain.
+- `--provenance-key-path <path>` points to the private key paired with the certificate.
+- `--provenance-key-password <value>` optionally supplies the key password (passed via environment to the C2PA CLI).
+- `--provenance-tool <path-or-name>` selects the C2PA CLI executable (default: `c2patool`).
+- `--provenance-claim-generator <value>` sets the claim generator string in the manifest.
+- `--provenance-failure-mode {soft-fail,hard-fail}` controls enforcement mode (`hard-fail` stops the run if provenance fails).
+
+When provenance is enabled, AutoAudio populates the following C2PA assertions:
+
+- `c2pa.ai.generative`
+  - `generator.name`: sourced from workflow node inputs (e.g., `inputs.model` in `VibeVoiceSingleSpeakerNode`).
+  - `generator.version`: parsed from the same model identifier value.
+- `c2pa.actions`
+  - Includes action `c2pa.created`.
+  - `softwareAgent.name` / `softwareAgent.version`: populated from AutoAudio runtime metadata (`AutoAudio` + `AUTOAUDIO_VERSION` env, default `dev`).
+  - `softwareAgent.backend.name` / `softwareAgent.backend.version`: sourced from workflow metadata (`class_type` and `_meta.title` when present).
+- `c2pa.hash.data`
+  - `alg`: `sha256`.
+  - `hash`: base64-encoded SHA-256 digest of final artifact bytes.
+
+AutoAudio validates required assertion fields before signing and raises explicit schema errors when required fields are missing. Manifest identifiers and embedding paths are persisted to checkpoint state for later audit.
+
 ## Outputs and run artifacts
 
 - Chapter files: `Chapter_###_<title>.<format>`
