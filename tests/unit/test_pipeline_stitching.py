@@ -5,12 +5,14 @@ import sys
 import types
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+# Mock uninstalled dependencies
 if "ebooklib" not in sys.modules:
     ebooklib_module = types.ModuleType("ebooklib")
     ebooklib_module.ITEM_COVER = 1
@@ -31,6 +33,7 @@ if "websocket" not in sys.modules:
     websocket_module.WebSocket = object
     sys.modules["websocket"] = websocket_module
 
+
 from core.pipeline import _sanitize_ffmpeg_metadata_value, combine_audio_files
 
 
@@ -48,24 +51,35 @@ def test_combine_audio_files_retries_without_cover(tmp_path):
 
     calls: list[list[str]] = []
 
-    def fake_run(cmd, check, stdout=None, stderr=None, text=None):  # noqa: ANN001
+    def fake_run(cmd, input=None, check=False, stdout=None, stderr=None, text=None):
         calls.append(cmd)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="mjpeg\n")
         if "-disposition:v" in cmd:
             raise subprocess.CalledProcessError(returncode=234, cmd=cmd)
-        return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffmpeg":
+            Path(cmd[-1]).write_bytes(b"out")
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"fake_raw_audio")
 
-    with patch("core.pipeline.subprocess.run", side_effect=fake_run):
+    with patch("core.pipeline.watermark_audio_bytes_best_effort") as watermark_mock, patch(
+        "core.pipeline.subprocess.run", side_effect=fake_run
+    ):
+        watermark_mock.return_value = (
+            types.SimpleNamespace(applied=True, verified=True, detail="ok"),
+            b"watermarked_audio_bytes"
+        )
         assert combine_audio_files(
             [str(segment)],
             str(output),
             metadata={"title": "Chapter 2: I.\nIntroduction"},
             cover_image=str(cover),
         )
-
+    
+    watermark_mock.assert_called_once()
+    
     ffmpeg_calls = [call for call in calls if call and call[0] == "ffmpeg"]
-    assert len(ffmpeg_calls) == 2
-    assert "-disposition:v" in ffmpeg_calls[0]
-    assert "-disposition:v" not in ffmpeg_calls[1]
-    assert "title=Chapter 2: I. Introduction" in ffmpeg_calls[1]
+    assert len(ffmpeg_calls) == 3
+    assert "-f" in ffmpeg_calls[0] and "concat" in ffmpeg_calls[0]
+    assert "-disposition:v" in ffmpeg_calls[1]
+    assert "-disposition:v" not in ffmpeg_calls[2]
+    assert "title=Chapter 2: I. Introduction" in ffmpeg_calls[2]

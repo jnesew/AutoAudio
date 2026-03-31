@@ -44,9 +44,9 @@ class RealComfyUIClient:
 
     def _wait_for_completion(self, prompt_id: str, *, timeout_seconds: float | None) -> None:
         ws = websocket.WebSocket()
-        ws.settimeout(timeout_seconds)
         try:
-            ws.connect(f"ws://{self.server_address}/ws?clientId={self.client_id}")
+            ws.connect(f"ws://{self.server_address}/ws?clientId={self.client_id}", timeout=timeout_seconds)
+            ws.settimeout(timeout_seconds)
             while True:
                 try:
                     out = ws.recv()
