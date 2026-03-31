@@ -24,7 +24,7 @@ AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 - The **VibeVoice Single Speaker** custom node available in ComfyUI (`VibeVoiceSingleSpeakerNode`)
 - https://huggingface.co/microsoft/VibeVoice-1.5B. Includes invisible watermarks.
     - Other models or variants are not supported.
-  - All chunk generations automatically prepend a synthesized compliance warning ("This audio was generated synthetically with AutoAudio. [pause]") before audio begins. Increase chunks_per_batch in configuration if the frequent repetition of this prompt becomes bothersome. Conversely, increase timeout to match.
+  - All batch generations automatically prepend a synthesized provenance labeling. ("This audio was generated synthetically with AutoAudio. [pause]") before audio begins. Increase chunks_per_batch in configuration if the frequent repetition of this prompt becomes bothersome. Conversely, increase timeout to match.
    
 - A reference voice file available in ComfyUI's input files as `default_voice.wav`(uploadable via GUI)
   - The bundled workflow `resources/workflows/vibevoice_single_speaker.json` loads this filename by default.
