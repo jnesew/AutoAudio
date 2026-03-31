@@ -22,9 +22,9 @@ AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 
 - ComfyUI server reachable at `127.0.0.1:8188` by default (or set `--comfyui-server-address`)
 - The **VibeVoice Single Speaker** custom node available in ComfyUI (`VibeVoiceSingleSpeakerNode`)
-- https://huggingface.co/microsoft/VibeVoice-1.5B. Includes both audible and invisible watermarks for compliance.
+- https://huggingface.co/microsoft/VibeVoice-1.5B. Includes invisible watermarks.
     - Other models or variants are not supported.
-  - Audible watermarks are at the start of every clip. To decrease their frequency, increase chunk size.
+  - All chunk generations automatically prepend a synthesized compliance warning ("This audio was generated synthetically with AutoAudio. [pause]") before audio begins. Increase chunks_per_batch in configuration if the frequent repetition of this prompt becomes bothersome. Conversely, increase timeout to match.
    
 - A reference voice file available in ComfyUI's input files as `default_voice.wav`(uploadable via GUI)
   - The bundled workflow `resources/workflows/vibevoice_single_speaker.json` loads this filename by default.
@@ -165,13 +165,13 @@ AutoAudio validates required assertion fields before signing and raises explicit
 
 ### Verify AI marking and watermarking
 
+The system automatically applies a public default fallback secret key (`default_public_autoaudio_key_123`) to guarantee consistent AudioSeal PyTorch watermarking happens.
 After generation, verify that segment and stitched outputs contain AI metadata tags,
 watermark status manifests, and machine-readable marking sidecars:
 
 ```bash
-python scripts/verify.py --output-dir "<output-dir>" --include-segments
+python src/provenannce/verify.py --output-dir "<output-dir>" --include-segments
 ```
-
 The command exits with a non-zero status if any artifact is missing `ai_*` tags,
 missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not applied/verified.
 
@@ -181,6 +181,7 @@ missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not
 - **No audio generated**: verify the VibeVoice node is installed and workflow-compatible.
 - **Missing reference voice**: ensure `default_voice.wav` exists in ComfyUI input files.
 - **Metadata fetch gives nothing**: this is optional; run without `--fetch-metadata` to stay fully offline.
+- **Audio  waterkmarks are anoying**: Increase batch sample count parameter.
 
 ## License
 

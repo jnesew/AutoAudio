@@ -48,7 +48,7 @@ from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
-from provenance.audio_watermark import watermark_audio_output_best_effort
+from provenance.audio_watermark import watermark_audio_bytes_best_effort
 from provenance.c2pa import ProvenanceConfig, ProvenanceRuntimeMetadata, apply_c2pa_with_policy, parse_model_identity_version
 
 
@@ -102,97 +102,6 @@ def _write_ai_marking_manifest(
     }
     manifest_path = artifact.with_suffix(f"{artifact.suffix}.ai.json")
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _metadata_tagging_audio_codec_args(artifact_path: Path) -> list[str]:
-    suffix = artifact_path.suffix.lower()
-    if suffix == ".flac":
-        return ["-c:a", "flac"]
-    if suffix == ".mp3":
-        return ["-c:a", "libmp3lame"]
-    if suffix == ".opus":
-        return ["-c:a", "libopus"]
-    if suffix in {".m4b", ".m4a", ".mp4"}:
-        return ["-c:a", "aac"]
-    if suffix == ".wav":
-        return ["-c:a", "pcm_s16le"]
-    return ["-c:a", "copy"]
-
-
-def _embed_ai_marking_metadata_inplace(artifact_path: str, logger: logging.Logger | None = None) -> bool:
-    log = logger or logging.getLogger("autoaudio.run")
-    source = Path(artifact_path)
-    if not source.exists():
-        return False
-
-    temp_output = source.with_name(f"{source.stem}.ai_marked{source.suffix}")
-    copy_cmd = ["ffmpeg", "-y", "-i", str(source), "-map", "0", "-c", "copy"]
-    copy_cmd.extend(_ai_marking_metadata_args())
-    copy_cmd.append(str(temp_output))
-
-    def _cleanup_temp() -> None:
-        if temp_output.exists():
-            try:
-                temp_output.unlink()
-            except Exception:
-                pass
-
-    try:
-        subprocess.run(copy_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.replace(temp_output, source)
-        return True
-    except Exception as copy_exc:
-        _cleanup_temp()
-        transcode_cmd = ["ffmpeg", "-y", "-i", str(source)]
-        transcode_cmd.extend(_metadata_tagging_audio_codec_args(source))
-        transcode_cmd.extend(_ai_marking_metadata_args())
-        transcode_cmd.append(str(temp_output))
-        try:
-            subprocess.run(transcode_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            os.replace(temp_output, source)
-            log.warning(
-                "AI metadata tagging required re-encode for %s after stream-copy failed (%s)",
-                artifact_path,
-                copy_exc,
-            )
-            return True
-        except Exception as transcode_exc:
-            _cleanup_temp()
-            log.warning("AI metadata tagging skipped for %s (%s)", artifact_path, transcode_exc)
-            return False
-
-
-def _apply_ai_marking_to_artifact(
-    artifact_path: str,
-    *,
-    content_id: str,
-    logger: logging.Logger,
-    require_success: bool = True,
-) -> None:
-    metadata_embedded = _embed_ai_marking_metadata_inplace(artifact_path, logger=logger)
-    watermark_result = watermark_audio_output_best_effort(
-        artifact_path,
-        content_id=content_id,
-        logger=logger,
-    )
-    _write_ai_marking_manifest(
-        artifact_path,
-        content_id=content_id,
-        metadata_embedded=metadata_embedded,
-        watermark_applied=watermark_result.applied,
-        watermark_verified=watermark_result.verified,
-        watermark_detail=watermark_result.detail,
-    )
-    if require_success and (
-        not metadata_embedded or not watermark_result.applied or not watermark_result.verified
-    ):
-        raise RuntimeError(
-            "AI marking failed strict checks: "
-            f"metadata_embedded={metadata_embedded}, "
-            f"watermark_applied={watermark_result.applied}, "
-            f"watermark_verified={watermark_result.verified}, "
-            f"detail={watermark_result.detail}"
-        )
 
 
 def _is_valid_cover_image(cover_image: str) -> bool:
@@ -388,10 +297,13 @@ def process_segment(
     config: AppConfig,
     comfyui_client: ComfyUIClient,
 ) -> tuple[bytes | None, str | None]:
+ 
+    final_text_segment = "This audio was generated synthetically with AutoAudio. [pause] " + text_segment
+
     try:
         artifact = comfyui_client.generate_audio(
             workflow_template=workflow_template,
-            text_segment=text_segment,
+            text_segment=final_text_segment,
             reference_voice=config.default_voice_filename,
             settings=settings,
             timeout_seconds=config.comfyui_timeout_seconds,
@@ -461,7 +373,6 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
 
     list_file = output_filename + ".concat.txt"
     meta_file = output_filename + ".ffmeta"
-    pending_output = output_filename + ".pending"
 
     try:
         with open(list_file, "w", encoding="utf-8") as file:
@@ -469,7 +380,20 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
                 escaped_path = path.replace("'", "'\\''")
                 file.write(f"file '{escaped_path}'\n")
 
-        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file]
+        extract_cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
+        extract_proc = subprocess.run(extract_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        concat_bytes = extract_proc.stdout
+
+        content_id = (metadata or {}).get("title") or Path(output_filename).name
+        watermark_result, marked_audio_data = watermark_audio_bytes_best_effort(
+            concat_bytes,
+            content_id=content_id,
+            logger=logging.getLogger("autoaudio.run"),
+        )
+        if not watermark_result.applied or not watermark_result.verified:
+            raise RuntimeError(f"AI marking failed strict checks: applied={watermark_result.applied}, verified={watermark_result.verified}")
+
+        cmd = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
         input_idx = 1
 
         if chapter_titles and len(chapter_titles) == len(valid_files):
@@ -502,50 +426,37 @@ def combine_audio_files(audio_files, output_filename, metadata=None, chapter_tit
             cmd.extend(["-disposition:v", "attached_pic"])
 
         cmd.extend(adapter.ffmpeg_output_args())
-        cmd.append(pending_output)
+        cmd.append(output_filename)
+
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, input=marked_audio_data, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             if include_cover:
                 logging.getLogger("autoaudio.run").warning(
                     "Stitching failed with attached cover; retrying without cover art for %s", output_filename
                 )
-                cmd_no_cover = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file]
+                cmd_no_cover = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
                 input_idx_no_cover = 1
                 if chapter_titles and len(chapter_titles) == len(valid_files):
                     cmd_no_cover.extend(["-i", meta_file, "-map_metadata", str(input_idx_no_cover)])
                 cmd_no_cover.extend(adapter.ffmpeg_metadata_args(context))
                 cmd_no_cover.extend(_ai_marking_metadata_args())
                 cmd_no_cover.extend(adapter.ffmpeg_output_args())
-                cmd_no_cover.append(pending_output)
-                subprocess.run(cmd_no_cover, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                cmd_no_cover.append(output_filename)
+                subprocess.run(cmd_no_cover, input=marked_audio_data, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 raise
 
-        content_id = (metadata or {}).get("title") or Path(output_filename).name
-        _apply_ai_marking_to_artifact(
-            pending_output,
+        _write_ai_marking_manifest(
+            output_filename,
             content_id=content_id,
-            logger=logging.getLogger("autoaudio.run"),
+            metadata_embedded=True,
+            watermark_applied=watermark_result.applied,
+            watermark_verified=watermark_result.verified,
+            watermark_detail=watermark_result.detail,
         )
-        os.replace(pending_output, output_filename)
-        pending_manifest = Path(pending_output).with_suffix(f"{Path(pending_output).suffix}.ai.json")
-        final_manifest = Path(output_filename).with_suffix(f"{Path(output_filename).suffix}.ai.json")
-        if pending_manifest.exists():
-            os.replace(pending_manifest, final_manifest)
         return True
     except Exception as exc:
-        if os.path.exists(pending_output):
-            try:
-                os.remove(pending_output)
-            except Exception:
-                pass
-        pending_manifest = Path(pending_output).with_suffix(f"{Path(pending_output).suffix}.ai.json")
-        if pending_manifest.exists():
-            try:
-                pending_manifest.unlink()
-            except Exception:
-                pass
         raise AudioStitchError(f"Error during stitching: {exc}") from exc
     finally:
         try:
@@ -637,6 +548,7 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--min-paragraphs-per-chapter", type=int, default=3)
     parser.add_argument("--chapters-per-part", type=int, default=5)
     parser.add_argument("--max-words-per-chunk", type=int, default=250)
+    parser.add_argument("--chunks-per-batch", type=int, default=7)
     parser.add_argument("--diffusion-steps", type=int, default=25)
     parser.add_argument("--temperature", type=float, default=0.95)
     parser.add_argument("--top-p", type=float, default=0.95)
@@ -649,7 +561,7 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--author", default="", help="Override audiobook author (highest metadata priority).")
     parser.add_argument("--comfyui-mode", choices=["network", "spoof"], default="network")
     parser.add_argument("--comfyui-server-address", default="127.0.0.1:8188")
-    parser.add_argument("--comfyui-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--comfyui-timeout-seconds", type=float, default=None, help="Overrides config default if provided.")
     parser.add_argument("--resume", choices=["auto", "yes", "no"], default="auto")
     parser.add_argument("--provenance-enabled", action="store_true", help="Enable C2PA signing and embedding.")
     parser.add_argument("--provenance-cert-path", default="", help="Path to X.509 certificate for C2PA signing.")
@@ -682,6 +594,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
     settings = GenerationSettings(
         max_words_per_chunk=args.max_words_per_chunk,
+        chunks_per_batch=args.chunks_per_batch,
         diffusion_steps=args.diffusion_steps,
         temperature=args.temperature,
         top_p=args.top_p,
@@ -701,6 +614,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
             "chapters_per_part": args.chapters_per_part,
             "max_words_per_chunk": args.max_words_per_chunk,
+            "chunks_per_batch": args.chunks_per_batch,
             "diffusion_steps": args.diffusion_steps,
             "temperature": args.temperature,
             "top_p": args.top_p,
@@ -804,8 +718,12 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 print("   (Skipping likely Gutenberg preamble)")
                 continue
 
-            chunks = split_text_smart(text, max_words=args.max_words_per_chunk)
-            print(f"   -> Split into {len(chunks)} segments.")
+            raw_chunks = split_text_smart(text, max_words=args.max_words_per_chunk)
+            chunks = []
+            for i in range(0, len(raw_chunks), args.chunks_per_batch):
+                chunks.append(" [pause] ".join(raw_chunks[i : i + args.chunks_per_batch]))
+
+            print(f"   -> Split into {len(raw_chunks)} raw segments, grouped into {len(chunks)} batches.")
             segment_files = []
             segment_keys_for_chapter: list[str] = []
 
@@ -833,21 +751,38 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 if audio_data and len(audio_data) > 16:
                     ext_to_use = audio_ext if audio_ext in [".wav", ".flac", ".mp3", ".opus"] else ".flac"
                     temp_filename = os.path.join(segment_cache_dir, f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}{ext_to_use}")
-                    pending_temp_filename = f"{temp_filename}.pending"
-                    with open(pending_temp_filename, "wb") as file:
-                        file.write(audio_data)
+
                     segment_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
                     segment_content_id = f"{segment_title}_seg_{seg_idx + 1:03d}"
-                    _apply_ai_marking_to_artifact(
-                        pending_temp_filename,
+
+                    watermark_result, marked_audio_data = watermark_audio_bytes_best_effort(
+                        audio_data,
                         content_id=segment_content_id,
                         logger=logger,
                     )
-                    os.replace(pending_temp_filename, temp_filename)
-                    pending_manifest = Path(pending_temp_filename).with_suffix(f"{Path(pending_temp_filename).suffix}.ai.json")
-                    final_manifest = Path(temp_filename).with_suffix(f"{Path(temp_filename).suffix}.ai.json")
-                    if pending_manifest.exists():
-                        os.replace(pending_manifest, final_manifest)
+
+                    if not watermark_result.applied or not watermark_result.verified:
+                        raise RuntimeError(f"AI marking failed strict checks: applied={watermark_result.applied}, verified={watermark_result.verified}")
+
+                    adapter = adapter_for_extension(temp_filename)
+                    cmd = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
+                    cmd.extend(_ai_marking_metadata_args())
+                    cmd.extend(adapter.ffmpeg_output_args())
+                    cmd.append(temp_filename)
+
+                    try:
+                        subprocess.run(cmd, input=marked_audio_data, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except subprocess.CalledProcessError as exc:
+                        raise ComfyUIProtocolError(f"Error encoding segment {seg_idx + 1}/{len(chunks)}: {exc}") from exc
+
+                    _write_ai_marking_manifest(
+                        temp_filename,
+                        content_id=segment_content_id,
+                        metadata_embedded=True,
+                        watermark_applied=watermark_result.applied,
+                        watermark_verified=watermark_result.verified,
+                        watermark_detail=watermark_result.detail,
+                    )
                     segment_files.append(temp_filename)
                     segment_keys_for_chapter.append(segment_key)
                     checkpoint["artifacts"]["segments"][segment_key] = {
@@ -1031,12 +966,17 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(launch_gui(project_root))
 
+    kwargs = {
+        "project_root": project_root,
+        "comfyui_mode": args.comfyui_mode,
+        "comfyui_server_address": args.comfyui_server_address,
+        "comfyui_spoof_scenario": args.comfyui_spoof_scenario,
+    }
+    if args.comfyui_timeout_seconds is not None:
+        kwargs["comfyui_timeout_seconds"] = args.comfyui_timeout_seconds
+
     config = AppConfig(
-        project_root=project_root,
-        comfyui_mode=args.comfyui_mode,
-        comfyui_server_address=args.comfyui_server_address,
-        comfyui_timeout_seconds=args.comfyui_timeout_seconds,
-        comfyui_spoof_scenario=args.comfyui_spoof_scenario,
+        **kwargs,
         provenance=ProvenanceConfig(
             enabled=args.provenance_enabled,
             cert_path=args.provenance_cert_path,

@@ -2,32 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import logging
 import os
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
-
-
-def _run(cmd: list[str]) -> None:
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def _decode_to_wav_24k_mono(input_path: Path, wav_path: Path) -> None:
-    _run(["ffmpeg", "-y", "-i", str(input_path), "-vn", "-ac", "1", "-ar", "24000", str(wav_path)])
-
-
-def _encode_wav_to_target(wav_path: Path, output_path: Path) -> None:
-    suffix = output_path.suffix.lower()
-    if suffix == ".wav":
-        output_path.write_bytes(wav_path.read_bytes())
-        return
-    if suffix in {".mp4", ".m4b"}:
-        _run(["ffmpeg", "-y", "-i", str(wav_path), "-c:a", "aac", str(output_path)])
-        return
-    _run(["ffmpeg", "-y", "-i", str(wav_path), str(output_path)])
 
 
 def _derive_16bit_message(secret_key: str, content_id: str, source_sha256: str):
@@ -72,99 +52,91 @@ class WatermarkResult:
     detail: str
 
 
-def watermark_audio_output(
-    input_path: str | os.PathLike,
+def watermark_audio_bytes(
+    audio_data: bytes,
     *,
     content_id: str,
     secret_key: str,
     device: str = "cpu",
     verify: bool = True,
     verify_threshold: float = 0.5,
-) -> Path:
-    """Embed an AudioSeal watermark into an audio artifact (24 kHz mono processing)."""
+) -> bytes:
+    """Embed an AudioSeal watermark into an audio byte stream (24 kHz mono processing)."""
     import librosa
     import soundfile as sf
     import torch
 
-    source_path = Path(input_path)
-    if not source_path.exists():
-        raise FileNotFoundError(source_path)
-
-    suffix = source_path.suffix.lower()
-    if suffix not in {".flac", ".mp3", ".wav", ".opus", ".mp4", ".m4b"}:
-        raise ValueError(f"Unsupported input format for watermarking: {suffix}")
-
-    source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    source_sha256 = hashlib.sha256(audio_data).hexdigest()
     msg = _derive_16bit_message(secret_key, content_id, source_sha256)
     generator, detector = _load_audioseal_models(device)
 
-    with tempfile.TemporaryDirectory() as td:
-        td_path = Path(td)
-        decoded_wav = td_path / "decoded_24k.wav"
-        watermarked_wav = td_path / "watermarked_24k.wav"
-        verify_wav = td_path / "verify_24k.wav"
+    decode_proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "24000", "-f", "wav", "pipe:1"],
+        input=audio_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=True
+    )
+    decoded_wav_bytes = decode_proc.stdout
 
-        _decode_to_wav_24k_mono(source_path, decoded_wav)
-        wav_np, sr = librosa.load(str(decoded_wav), sr=24000, mono=True)
-        wav = torch.from_numpy(wav_np).float().unsqueeze(0).unsqueeze(0).to(device)
+    wav_np, sr = librosa.load(io.BytesIO(decoded_wav_bytes), sr=24000, mono=True)
+    wav = torch.from_numpy(wav_np).float().unsqueeze(0).unsqueeze(0).to(device)
 
+    with torch.no_grad():
+        try:
+            watermark = generator.get_watermark(wav, sr, message=msg)
+        except TypeError:
+            try:
+                watermark = generator.get_watermark(wav, sample_rate=sr, message=msg)
+            except TypeError:
+                watermark = generator.get_watermark(wav, sr)
+        watermarked = torch.clamp(wav + watermark, -1.0, 1.0)
+
+    out_io = io.BytesIO()
+    sf.write(out_io, watermarked.squeeze(0).squeeze(0).detach().cpu().numpy(), sr, format="WAV")
+    watermarked_wav_bytes = out_io.getvalue()
+
+    if verify:
+        verify_np, verify_sr = librosa.load(io.BytesIO(watermarked_wav_bytes), sr=24000, mono=True)
+        verify_tensor = torch.from_numpy(verify_np).float().unsqueeze(0).unsqueeze(0).to(device)
         with torch.no_grad():
             try:
-                watermark = generator.get_watermark(wav, sr, message=msg)
+                prob, detected_msg = detector.detect_watermark(verify_tensor, verify_sr)
             except TypeError:
-                try:
-                    watermark = generator.get_watermark(wav, sample_rate=sr, message=msg)
-                except TypeError:
-                    watermark = generator.get_watermark(wav, sr)
-            watermarked = torch.clamp(wav + watermark, -1.0, 1.0)
+                prob, detected_msg = detector.detect_watermark(verify_tensor)
 
-        sf.write(str(watermarked_wav), watermarked.squeeze(0).squeeze(0).detach().cpu().numpy(), sr)
-        _encode_wav_to_target(watermarked_wav, source_path)
+        if _as_float(prob) < verify_threshold:
+            raise RuntimeError("AudioSeal verification failed: detector confidence below threshold.")
+        if torch.is_tensor(detected_msg):
+            expected = msg.to(detected_msg.device)
+            if detected_msg.shape == expected.shape and not torch.equal((detected_msg > 0.5).to(expected.dtype), expected):
+                raise RuntimeError("AudioSeal verification failed: embedded message did not round-trip.")
 
-        if verify:
-            _decode_to_wav_24k_mono(source_path, verify_wav)
-            verify_np, verify_sr = librosa.load(str(verify_wav), sr=24000, mono=True)
-            verify_tensor = torch.from_numpy(verify_np).float().unsqueeze(0).unsqueeze(0).to(device)
-            with torch.no_grad():
-                try:
-                    prob, detected_msg = detector.detect_watermark(verify_tensor, verify_sr)
-                except TypeError:
-                    prob, detected_msg = detector.detect_watermark(verify_tensor)
-
-            if _as_float(prob) < verify_threshold:
-                raise RuntimeError("AudioSeal verification failed: detector confidence below threshold.")
-            if torch.is_tensor(detected_msg):
-                expected = msg.to(detected_msg.device)
-                if detected_msg.shape == expected.shape and not torch.equal((detected_msg > 0.5).to(expected.dtype), expected):
-                    raise RuntimeError("AudioSeal verification failed: embedded message did not round-trip.")
-
-    return source_path
+    return watermarked_wav_bytes
 
 
-def watermark_audio_output_best_effort(
-    artifact_path: str | os.PathLike,
+def watermark_audio_bytes_best_effort(
+    audio_data: bytes,
     *,
     content_id: str,
     logger: logging.Logger | None = None,
-) -> WatermarkResult:
+) -> tuple[WatermarkResult, bytes]:
     """Best-effort wrapper so pipeline output remains available if watermarking deps/tools are missing."""
     log = logger or logging.getLogger("autoaudio.run")
-    secret_key = os.environ.get("AUTOAUDIO_WATERMARK_SECRET", "").strip()
-    if not secret_key:
-        log.info("Audio watermarking skipped for %s (AUTOAUDIO_WATERMARK_SECRET not set)", artifact_path)
-        return WatermarkResult(applied=False, verified=False, method="audioseal", detail="secret_missing")
+    secret_key = os.environ.get("AUTOAUDIO_WATERMARK_SECRET", "default_public_autoaudio_key_123").strip()
 
     device = os.environ.get("AUTOAUDIO_WATERMARK_DEVICE", "cpu")
     try:
-        watermark_audio_output(
-            artifact_path,
+        out_bytes = watermark_audio_bytes(
+            audio_data,
             content_id=content_id,
             secret_key=secret_key,
             device=device,
             verify=True,
             verify_threshold=0.5,
         )
-        return WatermarkResult(applied=True, verified=True, method="audioseal", detail="ok")
+        return WatermarkResult(applied=True, verified=True, method="audioseal", detail="ok"), out_bytes
     except Exception as exc:
-        log.warning("Audio watermarking skipped for %s (%s)", artifact_path, exc)
-        return WatermarkResult(applied=False, verified=False, method="audioseal", detail=str(exc))
+        log.warning("Audio watermarking skipped for %s (%s)", content_id, exc)
+        return WatermarkResult(applied=False, verified=False, method="audioseal", detail=str(exc)), audio_data
+

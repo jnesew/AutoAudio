@@ -18,7 +18,7 @@ class AppConfig:
     default_voice_filename: str = "default_voice.wav"
     comfyui_mode: str = "network"
     comfyui_server_address: str = "127.0.0.1:8188"
-    comfyui_timeout_seconds: float = 120.0
+    comfyui_timeout_seconds: float = 900.0
     comfyui_spoof_scenario: str = "success"
     provenance: ProvenanceConfig = field(default_factory=ProvenanceConfig)
 
@@ -35,6 +35,7 @@ class AppConfig:
 @dataclass(frozen=True)
 class GenerationSettings:
     max_words_per_chunk: int = 250
+    chunks_per_batch: int = 7
     diffusion_steps: int = 25
     temperature: float = 0.95
     top_p: float = 0.95

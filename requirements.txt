@@ -3,3 +3,9 @@ EbookLib>=0.18
 websocket-client>=1.8
 
 PySide6>=6.7
+
+numpy
+torch
+librosa
+soundfile
+audioseal
