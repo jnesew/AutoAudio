@@ -22,7 +22,7 @@ AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 
 - ComfyUI server reachable at `127.0.0.1:8188` by default (or set `--comfyui-server-address`)
 - The **VibeVoice Single Speaker** custom node available in ComfyUI (`VibeVoiceSingleSpeakerNode`)
-- https://huggingface.co/microsoft/VibeVoice-1.5B. Includes invisible watermarks.
+- https://huggingface.co/microsoft/VibeVoice-1.5B. Includes invisible watermarks.This software also adds invisible watermarks with audioseal separately.
     - Other models or variants are not supported.
   - All batch generations automatically prepend a synthesized provenance labeling. ("This audio was generated synthetically with AutoAudio. [pause]") before audio begins. Increase chunks_per_batch in configuration if the frequent repetition of this prompt becomes bothersome. Conversely, increase timeout to match.
    
