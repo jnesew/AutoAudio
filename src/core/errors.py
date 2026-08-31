@@ -39,7 +39,7 @@ class MetadataExtractionError(AutoAudioError):
 class ResumeStateError(AutoAudioError):
     guidance = ErrorGuidance(
         code="RESUME_STATE_ERROR",
-        remediation="Run with --resume no, or clear resources/.autoaudio_state/checkpoint_state.json.",
+        remediation="Run with --resume no, or clear .autoaudio_state in the selected output directory.",
         exit_code=4,
     )
 

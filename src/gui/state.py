@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from core.checkpoint import CheckpointStore
+from core.checkpoint import CheckpointError, CheckpointStore
 
 
 @dataclass(frozen=True)
@@ -14,7 +14,10 @@ class ResumeContext:
 
 def load_resume_context(checkpoint_store: CheckpointStore) -> ResumeContext | None:
     """Return resume-able UI state if an incomplete checkpoint exists."""
-    checkpoint = checkpoint_store.load()
+    try:
+        checkpoint = checkpoint_store.load()
+    except CheckpointError:
+        return None
     if not checkpoint:
         return None
 

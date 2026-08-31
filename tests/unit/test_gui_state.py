@@ -14,7 +14,7 @@ from gui.state import bool_from_ui_state, load_resume_context
 
 def test_load_resume_context_for_incomplete_checkpoint(tmp_path):
     store = CheckpointStore(state_dir=tmp_path)
-    store.save({"status": "running", "ui_state": {"input_book": "book.epub", "fetch_metadata": True}})
+    store.save({"version": 2, "status": "running", "ui_state": {"input_book": "book.epub", "fetch_metadata": True}})
 
     context = load_resume_context(store)
 
@@ -24,7 +24,14 @@ def test_load_resume_context_for_incomplete_checkpoint(tmp_path):
 
 def test_load_resume_context_ignores_completed_checkpoint(tmp_path):
     store = CheckpointStore(state_dir=tmp_path)
-    store.save({"status": "completed", "ui_state": {"input_book": "done.epub"}})
+    store.save({"version": 2, "status": "completed", "ui_state": {"input_book": "done.epub"}})
+
+    assert load_resume_context(store) is None
+
+
+def test_load_resume_context_ignores_legacy_checkpoint(tmp_path):
+    store = CheckpointStore(state_dir=tmp_path)
+    store.save({"version": 1, "status": "running", "ui_state": {"input_book": "legacy.epub"}})
 
     assert load_resume_context(store) is None
 

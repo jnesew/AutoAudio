@@ -25,6 +25,7 @@ from comfyui.real_client import RealComfyUIClient
 from comfyui.spoof_client import SpoofComfyUIClient
 from comfyui.workflow_loader import load_workflow_template
 from core.checkpoint import (
+    CheckpointError,
     CheckpointStore,
     create_initial_checkpoint,
     sha256_file,
@@ -43,6 +44,7 @@ from core.errors import (
 )
 from core.logging_utils import configure_run_logger
 from core.metadata_adapters import MetadataContext, adapter_for_extension
+from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
 from metadata.extractors import extract_epub_metadata, extract_text_fallback_metadata
 from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
@@ -263,6 +265,51 @@ def split_text_smart(text: str, max_words: int = 250) -> list[str]:
         chunks.append(current_chunk_str.strip())
 
     return chunks
+
+
+def build_v1_compat_book_plan(
+    chapters: list[tuple[str, str]],
+    *,
+    input_hash: str,
+    settings_hash: str,
+    workflow_hash: str,
+    max_words_per_chunk: int,
+    chunks_per_batch: int,
+) -> BookPlan:
+    """Freeze the current VibeVoice segmentation so a run cannot drift on resume."""
+    planned_chapters: list[PlannedChapter] = []
+    for chapter_index, (title, text) in enumerate(chapters):
+        skipped_reason = None
+        segment_texts: list[str] = []
+        if "Project Gutenberg" in text[:500]:
+            skipped_reason = "likely Project Gutenberg preamble"
+        else:
+            raw_chunks = split_text_smart(text, max_words=max_words_per_chunk)
+            for index in range(0, len(raw_chunks), chunks_per_batch):
+                segment_texts.append(" [pause] ".join(raw_chunks[index : index + chunks_per_batch]))
+
+        planned_chapters.append(
+            PlannedChapter(
+                index=chapter_index,
+                title=title,
+                segments=tuple(
+                    PlannedSegment.from_text(
+                        chapter_index=chapter_index,
+                        segment_index=segment_index,
+                        text=segment_text,
+                    )
+                    for segment_index, segment_text in enumerate(segment_texts)
+                ),
+                skipped_reason=skipped_reason,
+            )
+        )
+
+    return BookPlan(
+        input_sha256=input_hash,
+        settings_sha256=settings_hash,
+        workflow_sha256=workflow_hash,
+        chapters=tuple(planned_chapters),
+    )
 
 
 def get_audio_duration_ms(file_path: str) -> int:
@@ -588,9 +635,15 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     input_book = os.path.abspath(args.input_book)
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(config.state_dir, exist_ok=True)
+    state_dir = config.state_dir_for(output_dir)
+    os.makedirs(state_dir, exist_ok=True)
     logger, run_log_path = configure_run_logger(output_dir)
     logger.info("Pipeline started for input=%s output=%s", input_book, output_dir)
+
+    try:
+        source_mode = detect_source_mode(input_book, args.source_mode)
+    except ValueError as exc:
+        raise InputValidationError(str(exc)) from exc
 
     settings = GenerationSettings(
         max_words_per_chunk=args.max_words_per_chunk,
@@ -602,13 +655,15 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         free_memory_after_generate=args.free_memory_after_generate,
     )
     workflow_template = load_workflow_template(config.workflow_path)
+    workflow_hash = sha256_file(config.workflow_path)
     provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template)
     comfyui_client = build_comfyui_client(config)
-    checkpoint_store = CheckpointStore(state_dir=config.state_dir)
+    checkpoint_store = CheckpointStore(state_dir=state_dir)
+    plan_store = BookPlanStore(state_dir=state_dir)
     input_hash = sha256_file(input_book)
     settings_hash = stable_settings_hash(
         {
-            "source_mode": args.source_mode,
+            "source_mode": source_mode,
             "pages_per_chapter": args.pages_per_chapter,
             "target_words_per_chapter": args.target_words_per_chapter,
             "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
@@ -636,19 +691,46 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "provenance_claim_generator": args.provenance_claim_generator,
         }
     )
-    checkpoint = checkpoint_store.load()
+    checkpoint = None
+    checkpoint_load_error: CheckpointError | None = None
+    try:
+        checkpoint = checkpoint_store.load()
+    except CheckpointError as exc:
+        checkpoint_load_error = exc
+        logger.warning("Ignoring incompatible checkpoint for non-forced resume: %s", exc)
+
     can_resume = (
         checkpoint
         and checkpoint.get("status") in {"running", "failed"}
         and checkpoint.get("input", {}).get("sha256") == input_hash
-        and checkpoint.get("settings_hash") == settings_hash
+        and checkpoint.get("compatibility", {}).get("settings_sha256") == settings_hash
+        and checkpoint.get("compatibility", {}).get("workflow_sha256") == workflow_hash
         and checkpoint.get("output", {}).get("dir") == output_dir
+        and checkpoint.get("plan", {}).get("path") == str(plan_store.path)
+        and bool(checkpoint.get("plan", {}).get("sha256"))
     )
 
     if args.resume == "yes" and not can_resume:
-        raise ResumeStateError("Resume requested (--resume yes) but no compatible checkpoint state exists.")
+        detail = f" ({checkpoint_load_error})" if checkpoint_load_error else ""
+        raise ResumeStateError(f"Resume requested (--resume yes) but no compatible checkpoint state exists{detail}.")
 
+    book_plan: BookPlan | None = None
     if can_resume and args.resume in {"auto", "yes"}:
+        try:
+            book_plan = plan_store.load(expected_sha256=checkpoint["plan"]["sha256"])
+            if (
+                book_plan.input_sha256 != input_hash
+                or book_plan.settings_sha256 != settings_hash
+                or book_plan.workflow_sha256 != workflow_hash
+            ):
+                raise BookPlanError("Book plan compatibility fields do not match the current run.")
+        except BookPlanError as exc:
+            if args.resume == "yes":
+                raise ResumeStateError(f"Resume requested, but the persisted book plan is invalid: {exc}") from exc
+            logger.warning("Ignoring invalid book plan for automatic resume: %s", exc)
+            book_plan = None
+
+    if book_plan is not None:
         print(f"[Resume] Loaded checkpoint at {checkpoint_store.path}")
         checkpoint.setdefault("progress", {}).setdefault("completed_chapters", [])
         checkpoint["progress"].setdefault("completed_segments", {})
@@ -658,10 +740,36 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint["artifacts"].setdefault("provenance", {})
         checkpoint.setdefault("errors", [])
     else:
+        if source_mode == "epub":
+            blocks = extract_text_blocks_from_epub(input_book)
+            chapters = group_blocks_into_chapters(blocks, args.pages_per_chapter)
+        else:
+            blocks = extract_text_blocks_from_text_file(input_book)
+            chapters = group_paragraphs_into_chapters(
+                blocks,
+                target_words_per_chapter=args.target_words_per_chapter,
+                min_paragraphs_per_chapter=args.min_paragraphs_per_chapter,
+            )
+
+        if not chapters:
+            raise InputValidationError("No chapters found. Check the input file content/format and chapter grouping settings.")
+
+        book_plan = build_v1_compat_book_plan(
+            chapters,
+            input_hash=input_hash,
+            settings_hash=settings_hash,
+            workflow_hash=workflow_hash,
+            max_words_per_chunk=args.max_words_per_chunk,
+            chunks_per_batch=args.chunks_per_batch,
+        )
+        plan_store.save(book_plan)
         checkpoint = create_initial_checkpoint(
             input_path=input_book,
             input_hash=input_hash,
             settings_hash=settings_hash,
+            workflow_hash=workflow_hash,
+            plan_path=str(plan_store.path),
+            plan_hash=book_plan.sha256,
             output_dir=output_dir,
             output_format=args.output_format,
             ui_state={
@@ -677,26 +785,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint_store.save(checkpoint)
 
     print(f"--- Processing Book: {input_book} ---")
-    try:
-        source_mode = detect_source_mode(input_book, args.source_mode)
-    except ValueError as exc:
-        raise InputValidationError(str(exc)) from exc
-
     metadata = resolve_metadata(args, input_book, source_mode, output_dir)
-
-    if source_mode == "epub":
-        blocks = extract_text_blocks_from_epub(input_book)
-        chapters = group_blocks_into_chapters(blocks, args.pages_per_chapter)
-    else:
-        blocks = extract_text_blocks_from_text_file(input_book)
-        chapters = group_paragraphs_into_chapters(
-            blocks,
-            target_words_per_chapter=args.target_words_per_chapter,
-            min_paragraphs_per_chapter=args.min_paragraphs_per_chapter,
-        )
-
-    if not chapters:
-        raise InputValidationError("No chapters found. Check the input file content/format and chapter grouping settings.")
 
     part_index = 1
     part_chapter_files: list[tuple[str, str]] = []
@@ -704,7 +793,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     os.makedirs(segment_cache_dir, exist_ok=True)
 
     try:
-        for ch_idx, (title, text) in enumerate(chapters):
+        for chapter in book_plan.chapters:
+            ch_idx = chapter.index
+            title = chapter.title
             chapter_key = str(ch_idx)
             chapter_artifact = checkpoint.get("artifacts", {}).get("chapters", {}).get(chapter_key)
             if chapter_artifact and validate_artifact(chapter_artifact.get("path", ""), chapter_artifact.get("sha256")):
@@ -714,24 +805,22 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 continue
 
             print(f"\nProcessing {title}")
-            if "Project Gutenberg" in text[:500]:
-                print("   (Skipping likely Gutenberg preamble)")
+            if chapter.skipped_reason:
+                print(f"   (Skipping {chapter.skipped_reason})")
                 continue
 
-            raw_chunks = split_text_smart(text, max_words=args.max_words_per_chunk)
-            chunks = []
-            for i in range(0, len(raw_chunks), args.chunks_per_batch):
-                chunks.append(" [pause] ".join(raw_chunks[i : i + args.chunks_per_batch]))
-
-            print(f"   -> Split into {len(raw_chunks)} raw segments, grouped into {len(chunks)} batches.")
+            chunks = chapter.segments
+            print(f"   -> Loaded {len(chunks)} planned synthesis segments.")
             segment_files = []
             segment_keys_for_chapter: list[str] = []
 
-            for seg_idx, chunk in enumerate(chunks):
+            for segment in chunks:
+                seg_idx = segment.index
+                chunk = segment.text
                 if not chunk.strip():
                     continue
 
-                segment_key = f"{ch_idx}:{seg_idx}"
+                segment_key = segment.id
                 segment_artifact = checkpoint.get("artifacts", {}).get("segments", {}).get(segment_key)
                 if segment_artifact and validate_artifact(segment_artifact.get("path", ""), segment_artifact.get("sha256")):
                     segment_files.append(segment_artifact["path"])

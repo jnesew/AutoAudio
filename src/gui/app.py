@@ -389,7 +389,9 @@ def launch_gui(project_root: Path) -> int:
             self._prepopulate_from_checkpoint()
 
         def _prepopulate_from_checkpoint(self):
-            checkpoint_store = CheckpointStore(state_dir=AppConfig(project_root=self.project_root).state_dir)
+            checkpoint_store = CheckpointStore(
+                state_dir=AppConfig.state_dir_for(self.output_edit.text() or self.default_args.output_dir)
+            )
             resume_context = load_resume_context(checkpoint_store)
             if not resume_context:
                 return

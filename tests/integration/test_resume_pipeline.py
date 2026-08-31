@@ -4,6 +4,7 @@ import argparse
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from types import ModuleType
 from pathlib import Path
 from unittest.mock import patch
@@ -51,6 +52,7 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             min_paragraphs_per_chapter=1,
             chapters_per_part=10,
             max_words_per_chunk=4,
+            chunks_per_batch=1,
             diffusion_steps=25,
             temperature=0.95,
             top_p=0.95,
@@ -66,6 +68,13 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             comfyui_timeout_seconds=5.0,
             comfyui_spoof_scenario="success",
             resume=resume,
+            provenance_enabled=False,
+            provenance_cert_path="",
+            provenance_key_path="",
+            provenance_key_password="",
+            provenance_failure_mode="soft-fail",
+            provenance_tool="c2patool",
+            provenance_claim_generator="autoaudio",
         )
 
     def test_resume_after_interrupted_conversion_uses_checkpointed_segments(self) -> None:
@@ -98,8 +107,16 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 raise RuntimeError("spoofed interruption")
 
             first_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="auto")
+            def fake_encode(command, **kwargs):
+                del kwargs
+                Path(command[-1]).write_bytes(b"encoded-audio")
+                return SimpleNamespace(returncode=0)
+
+            marking_result = SimpleNamespace(applied=True, verified=True, detail="test watermark")
             with patch("core.pipeline.combine_audio_files", side_effect=fake_combine), patch(
                 "core.pipeline.process_segment", side_effect=interrupted_process_segment
+            ), patch("core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking_result, b"marked")), patch(
+                "core.pipeline.subprocess.run", side_effect=fake_encode
             ):
                 with self.assertRaises(RuntimeError):
                     run_pipeline(first_args, config)
@@ -114,6 +131,8 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             second_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="yes")
             with patch("core.pipeline.combine_audio_files", side_effect=fake_combine), patch(
                 "core.pipeline.process_segment", side_effect=normal_process_segment
+            ), patch("core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking_result, b"marked")), patch(
+                "core.pipeline.subprocess.run", side_effect=fake_encode
             ):
                 run_pipeline(second_args, config)
 
@@ -121,8 +140,9 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             self.assertGreaterEqual(second_call_count["n"], 1)
             self.assertLess(second_call_count["n"], 3)
 
-            checkpoint_file = project_root / "resources" / ".autoaudio_state" / "checkpoint_state.json"
+            checkpoint_file = output_dir / ".autoaudio_state" / "checkpoint_state.json"
             self.assertTrue(checkpoint_file.exists())
+            self.assertTrue((output_dir / ".autoaudio_state" / "book_plan.json").exists())
             self.assertIn("Part_001.flac", "\n".join([p.name for p in output_dir.iterdir()]))
 
 
