@@ -12,6 +12,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
+from core.segmentation import QWEN_SEGMENT_PLANNER_VERSION
 
 
 def _plan() -> BookPlan:
@@ -38,6 +39,7 @@ def test_book_plan_round_trip_and_hash_are_stable(tmp_path):
 
     assert loaded == plan
     assert loaded.sha256 == plan.sha256
+    assert loaded.planner_version == QWEN_SEGMENT_PLANNER_VERSION
 
 
 def test_book_plan_rejects_tampered_segment_text(tmp_path):

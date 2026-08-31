@@ -51,8 +51,8 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             target_words_per_chapter=1000,
             min_paragraphs_per_chapter=1,
             chapters_per_part=10,
-            max_words_per_chunk=4,
-            chunks_per_batch=1,
+            target_words_per_segment=4,
+            max_words_per_segment=4,
             narrator_profile="preset-eric-neutral",
             speaker="Eric",
             voice_instruct="",
@@ -91,7 +91,7 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             input_book = tmp / "book.txt"
-            # Enough text to create multiple segments with max_words_per_chunk=4
+            # Enough text to create multiple segments with a four-word hard limit.
             input_book.write_text(
                 "one two three four. five six seven eight. nine ten eleven twelve.", encoding="utf-8"
             )
