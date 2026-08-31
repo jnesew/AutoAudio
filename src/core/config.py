@@ -16,7 +16,7 @@ class AppConfig:
     workflows_dir: Path = field(init=False)
     qwen_custom_workflow_filename: str = "qwen3_tts_custom_voice.json"
     qwen_design_workflow_filename: str = "qwen3_tts_voice_design.json"
-    default_voice_filename: str = "default_voice.wav"
+    narrator_profiles_filename: str = "default_profiles.json"
     comfyui_mode: str = "network"
     comfyui_server_address: str = "127.0.0.1:8188"
     comfyui_timeout_seconds: float = 900.0
@@ -37,6 +37,10 @@ class AppConfig:
         if voice_mode == "design":
             return self.workflows_dir / self.qwen_design_workflow_filename
         raise ValueError(f"Unsupported Qwen voice mode: {voice_mode!r}")
+
+    @property
+    def narrator_profiles_path(self) -> Path:
+        return self.resource_dir / "narrators" / self.narrator_profiles_filename
 
     @staticmethod
     def state_dir_for(output_dir: str | Path) -> Path:
@@ -79,3 +83,7 @@ class GenerationSettings:
             raise ValueError("Qwen top_p must be in the range (0, 1].")
         if self.temperature <= 0 or self.repetition_penalty <= 0:
             raise ValueError("Qwen temperature and repetition_penalty must be positive.")
+        if self.attention not in {"sdpa", "flash_attn"}:
+            raise ValueError("Qwen attention must be 'sdpa' or 'flash_attn'.")
+        if not isinstance(self.unload_model_after_generate, bool):
+            raise ValueError("Qwen unload_model_after_generate must be a boolean.")

@@ -1,6 +1,6 @@
 # AutoAudio
 
-AutoAudio converts a book file (EPUB, TXT, Markdown, or RST) into chapter and part audiobook files using **ComfyUI + VibeVoice**.
+AutoAudio converts a book file (EPUB, TXT, Markdown, or RST) into chapter and part audiobook files using **ComfyUI + Qwen3-TTS**.
 
 ## What you need before running
 
@@ -21,25 +21,22 @@ AutoAudio uses `ffmpeg` and `ffprobe` for stitching audio and writing metadata. 
 AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 
 - ComfyUI server reachable at `127.0.0.1:8188` by default (or set `--comfyui-server-address`)
-- The **VibeVoice Single Speaker** custom node available in ComfyUI (`VibeVoiceSingleSpeakerNode`)
-- https://huggingface.co/microsoft/VibeVoice-1.5B. Includes invisible watermarks.This software also adds invisible watermarks with audioseal separately.
-    - Other models or variants are not supported.
-  - All batch generations automatically prepend a synthesized provenance labeling. ("This audio was generated synthetically with AutoAudio. [pause]") before audio begins. Increase chunks_per_batch in configuration if the frequent repetition of this prompt becomes bothersome. Conversely, increase timeout to match.
-   
-- A reference voice file available in ComfyUI's input files as `default_voice.wav`(uploadable via GUI)
-  - The bundled workflow `resources/workflows/vibevoice_single_speaker.json` loads this filename by default.
-  - ⚠️ If you use the GUI **Reference voice** uploader, ComfyUI will overwrite any existing `default_voice.wav` in its input directory.
-    - Ensure you have rights to use any reference voice used for voice styling in your jurisdiction  
+- The Qwen3-TTS custom nodes `FB_Qwen3TTSCustomVoice` and `FB_Qwen3TTSVoiceDesign`
+- A compatible 1.7B Qwen3-TTS model available to those nodes
+- One of the bundled non-cloning workflows:
+  - `resources/workflows/qwen3_tts_custom_voice.json` (stable preset mode)
+  - `resources/workflows/qwen3_tts_voice_design.json` (experimental designed mode)
+
+AutoAudio v2 has no reference-audio upload or voice-cloning path. Narrators are selected from text/configuration profiles in `resources/narrators/default_profiles.json`.
 
 > If you do not have a live ComfyUI runtime yet, you can still run pipeline logic with `--comfyui-mode spoof` for testing/development.
 
 ## Quick usage flow
 
-1. Start ComfyUI and verify the VibeVoice node loads correctly.
-2. Put your reference voice clip in ComfyUI input files as `default_voice.wav`.
-3. Choose an input book (`.epub`, `.txt`, `.md`, `.markdown`, or `.rst`).
-4. Run AutoAudio from CLI or GUI.
-5. Collect generated chapter/part files from your output directory (default: `audiobook_output/`).
+1. Start ComfyUI and verify the Qwen3-TTS nodes load correctly.
+2. Choose a narrator profile and input book (`.epub`, `.txt`, `.md`, `.markdown`, or `.rst`).
+3. Run AutoAudio from CLI or GUI.
+4. Collect generated chapter/part files from your output directory (default: `audiobook_output/`).
 
 ## Run methods
 
@@ -78,8 +75,8 @@ python auto_audiobook.py --gui
 Notes:
 
 - GUI mode requires `PySide6` (already included in `requirements.txt`).
-- In GUI, pick input/output paths, optionally enable **Fetch metadata**, then click **Start**.
-- The **Reference voice** picker uploads your file to ComfyUI as `default_voice.wav` and will overwrite any existing file with that name in ComfyUI input.
+- In GUI, pick input/output paths, choose a narrator profile, optionally adjust its speaker/instruction/language/seed, then click **Start**.
+- Preset profiles are the stable default. VoiceDesign profiles are labeled experimental because independent generations can drift.
 - If a compatible checkpoint exists, the GUI enables **Resume** automatically.
 
 ## CLI arguments
@@ -96,12 +93,17 @@ Notes:
 
 ### Generation tuning
 
+- `--narrator-profile <id>` selects a profile from the bundled narrator catalog.
 - `--max-words-per-chunk <int>`
-- `--diffusion-steps <int>`
+- `--chunks-per-batch <int>`
+- `--speaker <name>` overrides a preset profile speaker.
+- `--voice-instruct <text>` overrides style guidance or the VoiceDesign description.
+- `--model-choice <value>`, `--device <value>`, `--precision <value>`, `--language <value>`
+- `--seed <int>`, `--max-new-tokens <int>`, `--top-k <int>`
 - `--temperature <float>`
 - `--top-p <float>`
-- `--cfg-scale <float>`
-- `--free-memory-after-generate` (flag)
+- `--repetition-penalty <float>`, `--attention {sdpa,flash_attn}`
+- `--unload-model-after-generate` / `--no-unload-model-after-generate`
 
 ### Output and metadata
 
@@ -143,8 +145,8 @@ Metadata precedence is:
 When provenance is enabled, AutoAudio populates the following C2PA assertions:
 
 - `c2pa.ai.generative`
-  - `generator.name`: sourced from workflow node inputs (e.g., `inputs.model` in `VibeVoiceSingleSpeakerNode`).
-  - `generator.version`: parsed from the same model identifier value.
+  - `generator.name`: `Qwen3-TTS` for bundled workflows.
+  - `generator.version`: sourced from the Qwen node's `model_choice` value.
 - `c2pa.actions`
   - Includes action `c2pa.created`.
   - `softwareAgent.name` / `softwareAgent.version`: populated from AutoAudio runtime metadata (`AutoAudio` + `AUTOAUDIO_VERSION` env, default `dev`).
@@ -161,7 +163,8 @@ AutoAudio validates required assertion fields before signing and raises explicit
 - Part files: `<book title> - Part_###.<format>`
 - Segment cache: `<output-dir>/.segments/`
 - Run log: `<output-dir>/autoaudio_debug.log`
-- Resume checkpoint state: `resources/.autoaudio_state/checkpoint_state.json`
+- Resume checkpoint state: `<output-dir>/.autoaudio_state/checkpoint_state.json`
+- Immutable synthesis plan: `<output-dir>/.autoaudio_state/book_plan.json`
 
 ### Verify AI marking and watermarking
 
@@ -170,7 +173,7 @@ After generation, verify that segment and stitched outputs contain AI metadata t
 watermark status manifests, and machine-readable marking sidecars:
 
 ```bash
-python src/provenannce/verify.py --output-dir "<output-dir>" --include-segments
+python src/provenance/verify.py --output-dir "<output-dir>" --include-segments
 ```
 The command exits with a non-zero status if any artifact is missing `ai_*` tags,
 missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not applied/verified.
@@ -178,10 +181,10 @@ missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not
 ## Troubleshooting
 
 - **Cannot connect to ComfyUI**: verify server is running and address matches `--comfyui-server-address`.
-- **No audio generated**: verify the VibeVoice node is installed and workflow-compatible.
-- **Missing reference voice**: ensure `default_voice.wav` exists in ComfyUI input files.
+- **No audio generated**: verify the Qwen3-TTS nodes and selected model are installed and workflow-compatible.
+- **Unknown narrator profile**: choose an id from `resources/narrators/default_profiles.json`.
 - **Metadata fetch gives nothing**: this is optional; run without `--fetch-metadata` to stay fully offline.
-- **Audio  waterkmarks are anoying**: Increase batch sample count parameter.
+- **Designed voice varies between segments**: use a preset profile for the most consistent long-form narration.
 
 ## License
 

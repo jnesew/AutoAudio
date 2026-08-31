@@ -44,6 +44,7 @@ from core.errors import (
 )
 from core.logging_utils import configure_run_logger
 from core.metadata_adapters import MetadataContext, adapter_for_extension
+from core.narrator import NarratorCatalog, NarratorProfileError
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
 from metadata.extractors import extract_epub_metadata, extract_text_fallback_metadata
 from metadata.source_mode import detect_source_mode
@@ -602,21 +603,25 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--chapters-per-part", type=int, default=5)
     parser.add_argument("--max-words-per-chunk", type=int, default=250)
     parser.add_argument("--chunks-per-batch", type=int, default=7)
-    parser.add_argument("--voice-mode", choices=["preset", "design"], default="preset")
-    parser.add_argument("--speaker", default="Eric", help="Qwen CustomVoice speaker used in preset mode.")
-    parser.add_argument("--voice-instruct", default="", help="Style guidance or required VoiceDesign description.")
-    parser.add_argument("--model-choice", default="1.7B")
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--precision", default="bf16")
-    parser.add_argument("--language", default="English")
-    parser.add_argument("--seed", type=int, default=268583702137267)
-    parser.add_argument("--max-new-tokens", type=int, default=2048)
-    parser.add_argument("--top-p", type=float, default=0.8)
-    parser.add_argument("--top-k", type=int, default=20)
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--repetition-penalty", type=float, default=1.05)
-    parser.add_argument("--attention", choices=["sdpa", "flash_attn"], default="sdpa")
-    parser.add_argument("--unload-model-after-generate", action="store_true")
+    parser.add_argument("--narrator-profile", default="preset-eric-neutral")
+    parser.add_argument("--speaker", default=None, help="Override the selected preset profile's Qwen speaker.")
+    parser.add_argument("--voice-instruct", default=None, help="Override the selected profile's voice/style instruction.")
+    parser.add_argument("--model-choice", default=None)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--precision", default=None)
+    parser.add_argument("--language", default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--repetition-penalty", type=float, default=None)
+    parser.add_argument("--attention", choices=["sdpa", "flash_attn"], default=None)
+    parser.add_argument(
+        "--unload-model-after-generate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--output-format", choices=["flac", "mp3", "m4b"], default="flac")
     parser.add_argument("--fetch-metadata", action="store_true", help="Optional online metadata lookup (disabled by default).")
     parser.add_argument("--gutenberg-id", default="", help="Optional explicit Gutenberg ID for online metadata fetch.")
@@ -662,8 +667,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         raise InputValidationError(str(exc)) from exc
 
     try:
-        settings = GenerationSettings(
-            voice_mode=args.voice_mode,
+        narrator_catalog = NarratorCatalog.load(config.narrator_profiles_path)
+        narrator_profile = narrator_catalog.get(args.narrator_profile)
+        settings = narrator_profile.with_overrides(
             speaker=args.speaker,
             instruct=args.voice_instruct,
             model_choice=args.model_choice,
@@ -679,8 +685,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             attention=args.attention,
             unload_model_after_generate=args.unload_model_after_generate,
         )
-    except ValueError as exc:
-        raise InputValidationError(f"Invalid Qwen generation settings: {exc}") from exc
+    except NarratorProfileError as exc:
+        raise InputValidationError(f"Invalid narrator profile: {exc}") from exc
     workflow_path = config.workflow_path_for(settings.voice_mode)
     workflow_template = load_workflow_template(workflow_path)
     workflow_hash = sha256_file(workflow_path)
@@ -698,6 +704,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "chapters_per_part": args.chapters_per_part,
             "max_words_per_chunk": args.max_words_per_chunk,
             "chunks_per_batch": args.chunks_per_batch,
+            "narrator_profile": narrator_profile.id,
+            "narrator_profile_sha256": narrator_profile.sha256,
             "voice_mode": settings.voice_mode,
             "speaker": settings.speaker,
             "voice_instruct": settings.instruct,
@@ -708,8 +716,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "seed": settings.seed,
             "max_new_tokens": settings.max_new_tokens,
             "top_k": settings.top_k,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
+            "temperature": settings.temperature,
+            "top_p": settings.top_p,
             "repetition_penalty": settings.repetition_penalty,
             "attention": settings.attention,
             "unload_model_after_generate": settings.unload_model_after_generate,
@@ -814,6 +822,11 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 "input_book": args.input_book,
                 "output_dir": args.output_dir,
                 "source_mode": args.source_mode,
+                "narrator_profile": narrator_profile.id,
+                "speaker": settings.speaker,
+                "voice_instruct": settings.instruct,
+                "language": settings.language,
+                "seed": settings.seed,
                 "fetch_metadata": args.fetch_metadata,
                 "title": args.title,
                 "author": args.author,
