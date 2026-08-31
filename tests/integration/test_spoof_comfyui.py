@@ -17,7 +17,7 @@ from core.config import GenerationSettings
 
 class SpoofComfyUIIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
-        workflow_path = PROJECT_ROOT / "resources" / "workflows" / "vibevoice_single_speaker.json"
+        workflow_path = PROJECT_ROOT / "resources" / "workflows" / "qwen3_tts_custom_voice.json"
         self.workflow_template = load_workflow_template(workflow_path)
         self.settings = GenerationSettings()
 
@@ -28,7 +28,6 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
         artifact = client.generate_audio(
             workflow_template=self.workflow_template,
             text_segment="Hello sprint two",
-            reference_voice="default_voice.wav",
             settings=self.settings,
             timeout_seconds=3,
         )
@@ -43,7 +42,6 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
             client.generate_audio(
                 workflow_template=self.workflow_template,
                 text_segment="should timeout",
-                reference_voice="default_voice.wav",
                 settings=self.settings,
                 timeout_seconds=1,
             )
@@ -55,7 +53,6 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
             client.generate_audio(
                 workflow_template=self.workflow_template,
                 text_segment="bad history",
-                reference_voice="default_voice.wav",
                 settings=self.settings,
                 timeout_seconds=1,
             )
@@ -67,7 +64,6 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
             client.generate_audio(
                 workflow_template=self.workflow_template,
                 text_segment="cannot connect",
-                reference_voice="default_voice.wav",
                 settings=self.settings,
                 timeout_seconds=1,
             )

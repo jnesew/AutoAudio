@@ -1,0 +1,36 @@
+{
+  "26": {
+    "inputs": {
+      "audio": [
+        "38",
+        0
+      ]
+    },
+    "class_type": "PreviewAudio",
+    "_meta": {
+      "title": "Preview Audio"
+    }
+  },
+  "38": {
+    "inputs": {
+      "text": "",
+      "instruct": "",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "English",
+      "seed": 268583702137267,
+      "max_new_tokens": 2048,
+      "top_p": 0.8,
+      "top_k": 20,
+      "temperature": 1.0,
+      "repetition_penalty": 1.05,
+      "attention": "sdpa",
+      "unload_model_after_generate": false
+    },
+    "class_type": "FB_Qwen3TTSVoiceDesign",
+    "_meta": {
+      "title": "Qwen3-TTS VoiceDesign"
+    }
+  }
+}
