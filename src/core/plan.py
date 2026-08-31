@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from core.checkpoint import sha256_bytes
+from core.segmentation import QWEN_SEGMENT_PLANNER_VERSION
 
 
 BOOK_PLAN_SCHEMA_VERSION = 1
-V1_COMPAT_PLANNER_VERSION = "vibevoice-compat-v1"
 
 
 class BookPlanError(ValueError):
@@ -119,7 +119,7 @@ class BookPlan:
     settings_sha256: str
     workflow_sha256: str
     chapters: tuple[PlannedChapter, ...]
-    planner_version: str = V1_COMPAT_PLANNER_VERSION
+    planner_version: str = QWEN_SEGMENT_PLANNER_VERSION
     schema_version: int = BOOK_PLAN_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:

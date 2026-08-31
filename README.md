@@ -94,8 +94,8 @@ Notes:
 ### Generation tuning
 
 - `--narrator-profile <id>` selects a profile from the bundled narrator catalog.
-- `--max-words-per-chunk <int>`
-- `--chunks-per-batch <int>`
+- `--target-words-per-segment <int>` sets the soft semantic segment target.
+- `--max-words-per-segment <int>` sets the strict segment ceiling.
 - `--speaker <name>` overrides a preset profile speaker.
 - `--voice-instruct <text>` overrides style guidance or the VoiceDesign description.
 - `--model-choice <value>`, `--device <value>`, `--precision <value>`, `--language <value>`

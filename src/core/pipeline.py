@@ -46,6 +46,7 @@ from core.logging_utils import configure_run_logger
 from core.metadata_adapters import MetadataContext, adapter_for_extension
 from core.narrator import NarratorCatalog, NarratorProfileError
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
+from core.segmentation import SegmentPolicy, default_segment_policy, segment_text_for_qwen
 from metadata.extractors import extract_epub_metadata, extract_text_fallback_metadata
 from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
@@ -244,40 +245,15 @@ def group_paragraphs_into_chapters(
     return chapters
 
 
-def split_text_smart(text: str, max_words: int = 250) -> list[str]:
-    sentences = re.split(r"(?<=[.!?]) +", text)
-    chunks: list[str] = []
-    current_chunk_str = ""
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
-        word_count = len(sentence.split())
-        if len(current_chunk_str.split()) + word_count <= max_words:
-            current_chunk_str += f" {sentence}"
-        else:
-            if current_chunk_str.strip():
-                chunks.append(current_chunk_str.strip())
-            current_chunk_str = sentence
-
-    if current_chunk_str.strip():
-        chunks.append(current_chunk_str.strip())
-
-    return chunks
-
-
-def build_v1_compat_book_plan(
+def build_qwen_book_plan(
     chapters: list[tuple[str, str]],
     *,
     input_hash: str,
     settings_hash: str,
     workflow_hash: str,
-    max_words_per_chunk: int,
-    chunks_per_batch: int,
+    segment_policy: SegmentPolicy,
 ) -> BookPlan:
-    """Freeze the current VibeVoice segmentation so a run cannot drift on resume."""
+    """Freeze Qwen-aware semantic segments so a run cannot drift on resume."""
     planned_chapters: list[PlannedChapter] = []
     for chapter_index, (title, text) in enumerate(chapters):
         skipped_reason = None
@@ -285,9 +261,7 @@ def build_v1_compat_book_plan(
         if "Project Gutenberg" in text[:500]:
             skipped_reason = "likely Project Gutenberg preamble"
         else:
-            raw_chunks = split_text_smart(text, max_words=max_words_per_chunk)
-            for index in range(0, len(raw_chunks), chunks_per_batch):
-                segment_texts.append(" [pause] ".join(raw_chunks[index : index + chunks_per_batch]))
+            segment_texts = segment_text_for_qwen(text, segment_policy)
 
         planned_chapters.append(
             PlannedChapter(
@@ -346,7 +320,7 @@ def process_segment(
     comfyui_client: ComfyUIClient,
 ) -> tuple[bytes | None, str | None]:
  
-    final_text_segment = "This audio was generated synthetically with AutoAudio. [pause] " + text_segment
+    final_text_segment = "This audio was generated synthetically with AutoAudio.\n\n" + text_segment
 
     try:
         artifact = comfyui_client.generate_audio(
@@ -601,8 +575,8 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--target-words-per-chapter", type=int, default=2500)
     parser.add_argument("--min-paragraphs-per-chapter", type=int, default=3)
     parser.add_argument("--chapters-per-part", type=int, default=5)
-    parser.add_argument("--max-words-per-chunk", type=int, default=250)
-    parser.add_argument("--chunks-per-batch", type=int, default=7)
+    parser.add_argument("--target-words-per-segment", type=int, default=None)
+    parser.add_argument("--max-words-per-segment", type=int, default=None)
     parser.add_argument("--narrator-profile", default="preset-eric-neutral")
     parser.add_argument("--speaker", default=None, help="Override the selected preset profile's Qwen speaker.")
     parser.add_argument("--voice-instruct", default=None, help="Override the selected profile's voice/style instruction.")
@@ -687,6 +661,20 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         )
     except NarratorProfileError as exc:
         raise InputValidationError(f"Invalid narrator profile: {exc}") from exc
+    default_policy = default_segment_policy(settings.voice_mode)
+    try:
+        segment_policy = SegmentPolicy(
+            target_words=(
+                args.target_words_per_segment
+                if args.target_words_per_segment is not None
+                else default_policy.target_words
+            ),
+            max_words=(
+                args.max_words_per_segment if args.max_words_per_segment is not None else default_policy.max_words
+            ),
+        )
+    except ValueError as exc:
+        raise InputValidationError(f"Invalid Qwen segment settings: {exc}") from exc
     workflow_path = config.workflow_path_for(settings.voice_mode)
     workflow_template = load_workflow_template(workflow_path)
     workflow_hash = sha256_file(workflow_path)
@@ -702,8 +690,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "target_words_per_chapter": args.target_words_per_chapter,
             "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
             "chapters_per_part": args.chapters_per_part,
-            "max_words_per_chunk": args.max_words_per_chunk,
-            "chunks_per_batch": args.chunks_per_batch,
+            "target_words_per_segment": segment_policy.target_words,
+            "max_words_per_segment": segment_policy.max_words,
             "narrator_profile": narrator_profile.id,
             "narrator_profile_sha256": narrator_profile.sha256,
             "voice_mode": settings.voice_mode,
@@ -800,13 +788,12 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         if not chapters:
             raise InputValidationError("No chapters found. Check the input file content/format and chapter grouping settings.")
 
-        book_plan = build_v1_compat_book_plan(
+        book_plan = build_qwen_book_plan(
             chapters,
             input_hash=input_hash,
             settings_hash=settings_hash,
             workflow_hash=workflow_hash,
-            max_words_per_chunk=args.max_words_per_chunk,
-            chunks_per_batch=args.chunks_per_batch,
+            segment_policy=segment_policy,
         )
         plan_store.save(book_plan)
         checkpoint = create_initial_checkpoint(
