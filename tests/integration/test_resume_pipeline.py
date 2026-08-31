@@ -107,11 +107,19 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             )
 
             config = AppConfig(project_root=project_root, comfyui_mode="spoof")
+            combined_inputs: list[list[str]] = []
 
             def fake_combine(audio_files, output_filename, metadata=None, chapter_titles=None, cover_image=None):
-                del audio_files, metadata, chapter_titles, cover_image
+                del metadata, chapter_titles, cover_image
+                combined_inputs.append([str(path) for path in audio_files])
                 Path(output_filename).write_bytes(b"combined")
                 return True
+
+            def fake_disclosure_asset(**kwargs):
+                disclosure_path = Path(kwargs["state_dir"]) / "chapter_disclosure.flac"
+                disclosure_path.parent.mkdir(parents=True, exist_ok=True)
+                disclosure_path.write_bytes(b"disclosure")
+                return str(disclosure_path)
 
             call_count = {"n": 0}
 
@@ -133,6 +141,8 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 "core.pipeline.process_segment", side_effect=interrupted_process_segment
             ), patch("core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking_result, b"marked")), patch(
                 "core.pipeline.subprocess.run", side_effect=fake_encode
+            ), patch(
+                "core.pipeline.ensure_disclosure_asset", side_effect=fake_disclosure_asset
             ):
                 with self.assertRaises(RuntimeError):
                     run_pipeline(first_args, config)
@@ -149,6 +159,8 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 "core.pipeline.process_segment", side_effect=normal_process_segment
             ), patch("core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking_result, b"marked")), patch(
                 "core.pipeline.subprocess.run", side_effect=fake_encode
+            ), patch(
+                "core.pipeline.ensure_disclosure_asset", side_effect=fake_disclosure_asset
             ):
                 run_pipeline(second_args, config)
 
@@ -160,6 +172,9 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             self.assertTrue(checkpoint_file.exists())
             self.assertTrue((output_dir / ".autoaudio_state" / "book_plan.json").exists())
             self.assertIn("Part_001.flac", "\n".join([p.name for p in output_dir.iterdir()]))
+            chapter_inputs = [files for files in combined_inputs if Path(files[0]).name == "chapter_disclosure.flac"]
+            self.assertTrue(chapter_inputs)
+            self.assertTrue(all(sum(Path(path).name == "chapter_disclosure.flac" for path in files) == 1 for files in chapter_inputs))
 
 
 if __name__ == "__main__":

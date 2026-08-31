@@ -127,6 +127,7 @@ def create_initial_checkpoint(
             "completed_segments": {},
         },
         "artifacts": {
+            "disclosure": {},
             "segments": {},
             "chapters": {},
             "parts": {},

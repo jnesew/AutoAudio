@@ -29,6 +29,8 @@ AutoAudio expects a running ComfyUI server and a compatible workflow/node setup:
 
 AutoAudio v2 has no reference-audio upload or voice-cloning path. Narrators are selected from text/configuration profiles in `resources/narrators/default_profiles.json`.
 
+At the start of a job, AutoAudio generates and checkpoints one fixed neutral disclosure asset using the preset Qwen voice. That same watermarked asset is placed exactly once at the beginning of every produced chapter. Narration calls contain only book text, and every generated narration segment receives a verified non-audible AudioSeal watermark before chapter assembly.
+
 > If you do not have a live ComfyUI runtime yet, you can still run pipeline logic with `--comfyui-mode spoof` for testing/development.
 
 ## Quick usage flow

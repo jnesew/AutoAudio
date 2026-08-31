@@ -56,6 +56,10 @@ from provenance.audio_watermark import watermark_audio_bytes_best_effort
 from provenance.c2pa import ProvenanceConfig, ProvenanceRuntimeMetadata, apply_c2pa_with_policy, parse_model_identity_version
 
 
+CHAPTER_DISCLOSURE_TEXT = "This audio was generated synthetically with AutoAudio."
+CHAPTER_DISCLOSURE_POLICY_VERSION = "chapter-disclosure-v1"
+
+
 def _sanitize_ffmpeg_metadata_value(value: str | None) -> str | None:
     if not value:
         return None
@@ -319,13 +323,10 @@ def process_segment(
     config: AppConfig,
     comfyui_client: ComfyUIClient,
 ) -> tuple[bytes | None, str | None]:
- 
-    final_text_segment = "This audio was generated synthetically with AutoAudio.\n\n" + text_segment
-
     try:
         artifact = comfyui_client.generate_audio(
             workflow_template=workflow_template,
-            text_segment=final_text_segment,
+            text_segment=text_segment,
             settings=settings,
             timeout_seconds=config.comfyui_timeout_seconds,
         )
@@ -336,6 +337,117 @@ def process_segment(
         raise ComfyUIProtocolError(str(exc)) from exc
     except ComfyUIClientError as exc:
         raise PipelineRuntimeError(f"ComfyUI request failed: {exc}") from exc
+
+
+def write_watermarked_audio_artifact(
+    *,
+    audio_data: bytes,
+    output_path: str | Path,
+    content_id: str,
+    logger: logging.Logger,
+) -> None:
+    output_path = str(output_path)
+    watermark_result, marked_audio_data = watermark_audio_bytes_best_effort(
+        audio_data,
+        content_id=content_id,
+        logger=logger,
+    )
+    if not watermark_result.applied or not watermark_result.verified:
+        raise PipelineRuntimeError(
+            f"AI marking failed strict checks: applied={watermark_result.applied}, "
+            f"verified={watermark_result.verified}"
+        )
+
+    adapter = adapter_for_extension(output_path)
+    command = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
+    command.extend(_ai_marking_metadata_args())
+    command.extend(adapter.ffmpeg_output_args())
+    command.append(output_path)
+    try:
+        subprocess.run(
+            command,
+            input=marked_audio_data,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise PipelineRuntimeError(f"Error encoding watermarked audio artifact {output_path}: {exc}") from exc
+
+    _write_ai_marking_manifest(
+        output_path,
+        content_id=content_id,
+        metadata_embedded=True,
+        watermark_applied=watermark_result.applied,
+        watermark_verified=watermark_result.verified,
+        watermark_detail=watermark_result.detail,
+    )
+
+
+def ensure_disclosure_asset(
+    *,
+    state_dir: Path,
+    workflow_template: dict,
+    config: AppConfig,
+    comfyui_client: ComfyUIClient,
+    checkpoint: dict,
+    checkpoint_store: CheckpointStore,
+    logger: logging.Logger,
+) -> str:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    disclosure = checkpoint.setdefault("artifacts", {}).setdefault("disclosure", {})
+    manifest_path = disclosure.get("manifest_path", "")
+    if validate_artifact(disclosure.get("path", ""), disclosure.get("sha256")) and validate_artifact(
+        manifest_path, disclosure.get("manifest_sha256")
+    ):
+        return str(disclosure["path"])
+
+    settings = GenerationSettings(
+        voice_mode="preset",
+        speaker="Eric",
+        instruct="Use a neutral, clear announcement voice with steady pacing.",
+        model_choice="1.7B",
+        device="auto",
+        precision="bf16",
+        language="English",
+        seed=268583702137267,
+        max_new_tokens=256,
+        top_p=0.8,
+        top_k=20,
+        temperature=1.0,
+        repetition_penalty=1.05,
+        attention="sdpa",
+        unload_model_after_generate=False,
+    )
+    audio_data, _audio_ext = process_segment(
+        text_segment=CHAPTER_DISCLOSURE_TEXT,
+        workflow_template=workflow_template,
+        settings=settings,
+        config=config,
+        comfyui_client=comfyui_client,
+    )
+    if not audio_data or len(audio_data) <= 16:
+        raise ComfyUIProtocolError("Chapter disclosure generation returned an invalid audio payload.")
+
+    output_path = state_dir / "chapter_disclosure.flac"
+    content_id = "autoaudio_chapter_disclosure_v1"
+    write_watermarked_audio_artifact(
+        audio_data=audio_data,
+        output_path=output_path,
+        content_id=content_id,
+        logger=logger,
+    )
+    sidecar_path = output_path.with_suffix(f"{output_path.suffix}.ai.json")
+    checkpoint["artifacts"]["disclosure"] = {
+        "path": str(output_path),
+        "sha256": sha256_file(output_path),
+        "manifest_path": str(sidecar_path),
+        "manifest_sha256": sha256_file(sidecar_path),
+        "policy_version": CHAPTER_DISCLOSURE_POLICY_VERSION,
+        "text_sha256": hashlib.sha256(CHAPTER_DISCLOSURE_TEXT.encode("utf-8")).hexdigest(),
+    }
+    checkpoint_store.save(checkpoint)
+    return str(output_path)
 
 
 def build_comfyui_client(config: AppConfig) -> ComfyUIClient:
@@ -677,7 +789,20 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         raise InputValidationError(f"Invalid Qwen segment settings: {exc}") from exc
     workflow_path = config.workflow_path_for(settings.voice_mode)
     workflow_template = load_workflow_template(workflow_path)
-    workflow_hash = sha256_file(workflow_path)
+    narration_workflow_hash = sha256_file(workflow_path)
+    disclosure_workflow_path = config.workflow_path_for("preset")
+    disclosure_workflow_template = (
+        workflow_template
+        if disclosure_workflow_path == workflow_path
+        else load_workflow_template(disclosure_workflow_path)
+    )
+    disclosure_workflow_hash = sha256_file(disclosure_workflow_path)
+    workflow_hash = stable_settings_hash(
+        {
+            "narration_workflow_sha256": narration_workflow_hash,
+            "disclosure_workflow_sha256": disclosure_workflow_hash,
+        }
+    )
     provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template)
     comfyui_client = build_comfyui_client(config)
     checkpoint_store = CheckpointStore(state_dir=state_dir)
@@ -709,6 +834,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "repetition_penalty": settings.repetition_penalty,
             "attention": settings.attention,
             "unload_model_after_generate": settings.unload_model_after_generate,
+            "chapter_disclosure_policy": CHAPTER_DISCLOSURE_POLICY_VERSION,
+            "chapter_disclosure_text": CHAPTER_DISCLOSURE_TEXT,
             "output_format": args.output_format,
             "fetch_metadata": args.fetch_metadata,
             "gutenberg_id": args.gutenberg_id,
@@ -769,6 +896,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint.setdefault("progress", {}).setdefault("completed_chapters", [])
         checkpoint["progress"].setdefault("completed_segments", {})
         checkpoint.setdefault("artifacts", {}).setdefault("segments", {})
+        checkpoint["artifacts"].setdefault("disclosure", {})
         checkpoint["artifacts"].setdefault("chapters", {})
         checkpoint["artifacts"].setdefault("parts", {})
         checkpoint["artifacts"].setdefault("provenance", {})
@@ -831,6 +959,15 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     os.makedirs(segment_cache_dir, exist_ok=True)
 
     try:
+        disclosure_file = ensure_disclosure_asset(
+            state_dir=state_dir,
+            workflow_template=disclosure_workflow_template,
+            config=config,
+            comfyui_client=comfyui_client,
+            checkpoint=checkpoint,
+            checkpoint_store=checkpoint_store,
+            logger=logger,
+        )
         for chapter in book_plan.chapters:
             ch_idx = chapter.index
             title = chapter.title
@@ -882,33 +1019,11 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                     segment_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
                     segment_content_id = f"{segment_title}_seg_{seg_idx + 1:03d}"
 
-                    watermark_result, marked_audio_data = watermark_audio_bytes_best_effort(
-                        audio_data,
+                    write_watermarked_audio_artifact(
+                        audio_data=audio_data,
+                        output_path=temp_filename,
                         content_id=segment_content_id,
                         logger=logger,
-                    )
-
-                    if not watermark_result.applied or not watermark_result.verified:
-                        raise RuntimeError(f"AI marking failed strict checks: applied={watermark_result.applied}, verified={watermark_result.verified}")
-
-                    adapter = adapter_for_extension(temp_filename)
-                    cmd = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
-                    cmd.extend(_ai_marking_metadata_args())
-                    cmd.extend(adapter.ffmpeg_output_args())
-                    cmd.append(temp_filename)
-
-                    try:
-                        subprocess.run(cmd, input=marked_audio_data, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except subprocess.CalledProcessError as exc:
-                        raise ComfyUIProtocolError(f"Error encoding segment {seg_idx + 1}/{len(chunks)}: {exc}") from exc
-
-                    _write_ai_marking_manifest(
-                        temp_filename,
-                        content_id=segment_content_id,
-                        metadata_embedded=True,
-                        watermark_applied=watermark_result.applied,
-                        watermark_verified=watermark_result.verified,
-                        watermark_detail=watermark_result.detail,
                     )
                     segment_files.append(temp_filename)
                     segment_keys_for_chapter.append(segment_key)
@@ -936,7 +1051,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
             print(f"   -> Stitching chapter to {chapter_filename}...")
             if combine_audio_files(
-                segment_files,
+                [disclosure_file, *segment_files],
                 chapter_filename,
                 metadata=chapter_meta,
                 cover_image=metadata.cover_image_path,
