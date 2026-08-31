@@ -57,7 +57,7 @@ def test_combine_audio_files_retries_without_cover(tmp_path):
             return subprocess.CompletedProcess(cmd, 0, stdout="mjpeg\n")
         if "-disposition:v" in cmd:
             raise subprocess.CalledProcessError(returncode=234, cmd=cmd)
-        if cmd[0] == "ffmpeg":
+        if cmd[0] == "ffmpeg" and cmd[-1] != "pipe:1":
             Path(cmd[-1]).write_bytes(b"out")
         return subprocess.CompletedProcess(cmd, 0, stdout=b"fake_raw_audio")
 

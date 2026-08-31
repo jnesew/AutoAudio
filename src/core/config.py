@@ -13,7 +13,6 @@ class AppConfig:
     project_root: Path
     resource_dir: Path = field(init=False)
     workflows_dir: Path = field(init=False)
-    state_dir: Path = field(init=False)
     default_workflow_filename: str = "vibevoice_single_speaker.json"
     default_voice_filename: str = "default_voice.wav"
     comfyui_mode: str = "network"
@@ -25,11 +24,15 @@ class AppConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "resource_dir", self.project_root / "resources")
         object.__setattr__(self, "workflows_dir", self.resource_dir / "workflows")
-        object.__setattr__(self, "state_dir", self.resource_dir / ".autoaudio_state")
 
     @property
     def workflow_path(self) -> Path:
         return self.workflows_dir / self.default_workflow_filename
+
+    @staticmethod
+    def state_dir_for(output_dir: str | Path) -> Path:
+        """Keep resumable state scoped to the output job rather than the installation."""
+        return Path(output_dir).resolve() / ".autoaudio_state"
 
 
 @dataclass(frozen=True)
