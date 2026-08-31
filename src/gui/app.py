@@ -4,16 +4,13 @@ import argparse
 import contextlib
 import io
 import os
-import subprocess
-import tempfile
 import traceback
 from pathlib import Path
 
-from comfyui.real_client import RealComfyUIClient
-from comfyui.workflow_loader import load_workflow_template
 from core.checkpoint import CheckpointStore
 from core.config import AppConfig
 from core.errors import format_user_error
+from core.narrator import NarratorCatalog
 from core.pipeline import build_argument_parser, detect_source_mode, run_pipeline, resolve_metadata
 from gui.state import bool_from_ui_state, load_resume_context
 
@@ -36,6 +33,7 @@ def launch_gui(project_root: Path) -> int:
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
+            QComboBox,
             QFileDialog,
             QFormLayout,
             QGridLayout,
@@ -104,6 +102,8 @@ def launch_gui(project_root: Path) -> int:
             self.project_root = project_root
             self.parser = build_argument_parser(project_root)
             self.default_args = self.parser.parse_args([])
+            self.app_config = AppConfig(project_root=self.project_root)
+            self.narrator_catalog = NarratorCatalog.load(self.app_config.narrator_profiles_path)
 
             self.worker_thread: QThread | None = None
             self.worker: PipelineWorker | None = None
@@ -125,19 +125,16 @@ def launch_gui(project_root: Path) -> int:
             out_btn = QPushButton("Browse…")
             out_btn.clicked.connect(self._pick_output_dir)
 
-            self.reference_voice_edit = FileDropLineEdit("")
-            self.reference_voice_edit.file_dropped.connect(self._on_reference_voice_changed)
-            self.reference_voice_edit.editingFinished.connect(
-                lambda: self._on_reference_voice_changed(self.reference_voice_edit.text())
-            )
-            self.reference_voice_edit.setToolTip(
-                "Uploads to ComfyUI as default_voice.wav (overwrites existing file with that name)."
-            )
-            ref_btn = QPushButton("Browse…")
-            ref_btn.clicked.connect(self._pick_reference_voice)
-            ref_btn.setToolTip("Uploads to ComfyUI as default_voice.wav.")
-            self.reference_voice_warning = QLabel("⚠️ Uploading reference voice overwrites ComfyUI input/default_voice.wav")
-            self.reference_voice_warning.setWordWrap(True)
+            self.narrator_profile_combo = QComboBox()
+            for profile in self.narrator_catalog.profiles:
+                self.narrator_profile_combo.addItem(profile.name, profile.id)
+            self.narrator_profile_combo.currentIndexChanged.connect(self._on_narrator_profile_changed)
+            self.narrator_detail = QLabel()
+            self.narrator_detail.setWordWrap(True)
+            self.speaker_edit = QLineEdit()
+            self.voice_instruct_edit = QLineEdit()
+            self.language_edit = QLineEdit()
+            self.seed_edit = QLineEdit()
 
             io_layout.addWidget(QLabel("Input file"), 0, 0)
             io_layout.addWidget(self.input_edit, 0, 1)
@@ -147,10 +144,17 @@ def launch_gui(project_root: Path) -> int:
             io_layout.addWidget(self.output_edit, 1, 1)
             io_layout.addWidget(out_btn, 1, 2)
 
-            io_layout.addWidget(QLabel("Reference voice"), 2, 0)
-            io_layout.addWidget(self.reference_voice_edit, 2, 1)
-            io_layout.addWidget(ref_btn, 2, 2)
-            io_layout.addWidget(self.reference_voice_warning, 3, 1, 1, 2)
+            io_layout.addWidget(QLabel("Narrator profile"), 2, 0)
+            io_layout.addWidget(self.narrator_profile_combo, 2, 1, 1, 2)
+            io_layout.addWidget(self.narrator_detail, 3, 1, 1, 2)
+            io_layout.addWidget(QLabel("Preset speaker"), 4, 0)
+            io_layout.addWidget(self.speaker_edit, 4, 1, 1, 2)
+            io_layout.addWidget(QLabel("Voice instruction"), 5, 0)
+            io_layout.addWidget(self.voice_instruct_edit, 5, 1, 1, 2)
+            io_layout.addWidget(QLabel("Language"), 6, 0)
+            io_layout.addWidget(self.language_edit, 6, 1)
+            io_layout.addWidget(QLabel("Seed"), 6, 2)
+            io_layout.addWidget(self.seed_edit, 6, 3)
 
             options_group = QGroupBox("Options")
             options_layout = QHBoxLayout(options_group)
@@ -196,6 +200,7 @@ def launch_gui(project_root: Path) -> int:
             layout.addWidget(self.progress)
             layout.addWidget(self.log, 1)
 
+            self._on_narrator_profile_changed(self.narrator_profile_combo.currentIndex())
             self._prepopulate_from_checkpoint()
             self._on_input_changed(self.input_edit.text())
 
@@ -219,79 +224,19 @@ def launch_gui(project_root: Path) -> int:
             if dir_path:
                 self.output_edit.setText(dir_path)
 
-        def _pick_reference_voice(self):
-            file_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "Select reference voice audio",
-                self.reference_voice_edit.text() or str(self.project_root),
-                (
-                    "Audio files (*.wav *.mp3 *.flac *.m4a *.ogg *.aac *.aif *.aiff *.wma);;"
-                    "All files (*.*)"
-                ),
-            )
-            if file_path:
-                self.reference_voice_edit.setText(file_path)
-                self._on_reference_voice_changed(file_path)
-
-        def _on_reference_voice_changed(self, file_path: str):
-            normalized = file_path.strip()
-            if not normalized:
+        def _on_narrator_profile_changed(self, _index: int):
+            profile_id = self.narrator_profile_combo.currentData()
+            if not profile_id:
                 return
-
-            if not os.path.isfile(normalized):
-                QMessageBox.warning(self, "Invalid audio", "Please select a valid reference voice audio file.")
-                return
-
-            args = self._collect_args(resume_mode="auto")
-            if args.comfyui_mode != "network":
-                self._append_log("Reference voice upload is only available in network ComfyUI mode.")
-                return
-
-            try:
-                config = self._build_config(args)
-                upload_workflow = load_workflow_template(config.workflows_dir / "upload_voice.json")
-                client = RealComfyUIClient(config.comfyui_server_address)
-                self._append_log(f"Uploading reference voice from: {normalized}")
-                upload_audio_path = normalized
-                temp_wav_path: str | None = None
-                if Path(normalized).suffix.lower() != ".wav":
-                    with tempfile.NamedTemporaryFile(prefix="autoaudio_voice_", suffix=".wav", delete=False) as temp_file:
-                        temp_wav_path = temp_file.name
-                    self._append_log("Converting reference voice to WAV for ComfyUI compatibility...")
-                    subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-y",
-                            "-i",
-                            normalized,
-                            "-vn",
-                            "-acodec",
-                            "pcm_s16le",
-                            "-ar",
-                            "44100",
-                            "-ac",
-                            "1",
-                            temp_wav_path,
-                        ],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        check=True,
-                    )
-                    upload_audio_path = temp_wav_path
-
-                client.upload_reference_voice(
-                    file_path=upload_audio_path,
-                    target_filename=config.default_voice_filename,
-                    upload_workflow_template=upload_workflow,
-                    timeout_seconds=config.comfyui_timeout_seconds,
-                )
-                self._append_log("Reference voice uploaded as default_voice.wav.")
-            except Exception as exc:  # noqa: BLE001
-                QMessageBox.critical(self, "Upload failed", f"Failed to upload reference voice:\n{format_user_error(exc)}")
-            finally:
-                if "temp_wav_path" in locals() and temp_wav_path and os.path.exists(temp_wav_path):
-                    os.remove(temp_wav_path)
+            profile = self.narrator_catalog.get(str(profile_id))
+            settings = profile.settings
+            self.speaker_edit.setText(settings.speaker)
+            self.speaker_edit.setEnabled(settings.voice_mode == "preset")
+            self.voice_instruct_edit.setText(settings.instruct)
+            self.language_edit.setText(settings.language)
+            self.seed_edit.setText(str(settings.seed))
+            label = "Stable preset" if profile.stability == "stable" else "Experimental VoiceDesign"
+            self.narrator_detail.setText(f"{label}: {profile.description}")
 
         def _on_input_changed(self, file_path: str):
             if not file_path or not os.path.exists(file_path):
@@ -334,6 +279,12 @@ def launch_gui(project_root: Path) -> int:
             args.output_dir = self.output_edit.text().strip() or args.output_dir
             args.fetch_metadata = self.fetch_metadata_checkbox.isChecked()
             args.resume = resume_mode
+            args.narrator_profile = str(self.narrator_profile_combo.currentData())
+            args.speaker = self.speaker_edit.text().strip() or None
+            args.voice_instruct = self.voice_instruct_edit.text().strip() or None
+            args.language = self.language_edit.text().strip() or None
+            seed_text = self.seed_edit.text().strip()
+            args.seed = int(seed_text) if seed_text.isdigit() else None
             return args
 
         def _build_config(self, args: argparse.Namespace) -> AppConfig:
@@ -400,6 +351,14 @@ def launch_gui(project_root: Path) -> int:
             self.input_edit.setText(str(ui_state.get("input_book", self.input_edit.text())))
             self.output_edit.setText(str(ui_state.get("output_dir", self.output_edit.text())))
             self.fetch_metadata_checkbox.setChecked(bool_from_ui_state(ui_state.get("fetch_metadata"), default=False))
+            narrator_profile = str(ui_state.get("narrator_profile", ""))
+            profile_index = self.narrator_profile_combo.findData(narrator_profile)
+            if profile_index >= 0:
+                self.narrator_profile_combo.setCurrentIndex(profile_index)
+            self.speaker_edit.setText(str(ui_state.get("speaker", self.speaker_edit.text())))
+            self.voice_instruct_edit.setText(str(ui_state.get("voice_instruct", self.voice_instruct_edit.text())))
+            self.language_edit.setText(str(ui_state.get("language", self.language_edit.text())))
+            self.seed_edit.setText(str(ui_state.get("seed", self.seed_edit.text())))
             self.resume_btn.setEnabled(True)
             self._append_log(f"Detected resumable run at {resume_context.checkpoint_path}")
 

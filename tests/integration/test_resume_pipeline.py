@@ -53,7 +53,7 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             chapters_per_part=10,
             max_words_per_chunk=4,
             chunks_per_batch=1,
-            voice_mode="preset",
+            narrator_profile="preset-eric-neutral",
             speaker="Eric",
             voice_instruct="",
             model_choice="1.7B",
@@ -99,6 +99,12 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             project_root = tmp / "project"
             (project_root / "resources" / "workflows").mkdir(parents=True)
             (project_root / "resources" / "workflows" / "qwen3_tts_custom_voice.json").write_text("{}", encoding="utf-8")
+            (project_root / "resources" / "narrators").mkdir(parents=True)
+            bundled_profiles = PROJECT_ROOT / "resources" / "narrators" / "default_profiles.json"
+            (project_root / "resources" / "narrators" / "default_profiles.json").write_text(
+                bundled_profiles.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
 
             config = AppConfig(project_root=project_root, comfyui_mode="spoof")
 
