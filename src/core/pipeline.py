@@ -351,7 +351,6 @@ def process_segment(
         artifact = comfyui_client.generate_audio(
             workflow_template=workflow_template,
             text_segment=final_text_segment,
-            reference_voice=config.default_voice_filename,
             settings=settings,
             timeout_seconds=config.comfyui_timeout_seconds,
         )
@@ -381,16 +380,23 @@ def _extract_provenance_runtime_metadata(workflow_template: dict) -> ProvenanceR
             continue
         class_type = node.get("class_type")
         inputs = node.get("inputs", {})
-        if not backend_name or backend_name == "unknown-backend":
-            if class_type:
-                backend_name = str(class_type)
+        if class_type in {"FB_Qwen3TTSCustomVoice", "FB_Qwen3TTSVoiceDesign"}:
+            backend_name = str(class_type)
         if isinstance(inputs, dict) and not model_identity:
-            model_value = inputs.get("model")
+            model_value = inputs.get("model_choice") or inputs.get("model")
             if isinstance(model_value, str) and model_value.strip():
-                model_identity, model_version = parse_model_identity_version(model_value.strip())
+                if class_type in {"FB_Qwen3TTSCustomVoice", "FB_Qwen3TTSVoiceDesign"}:
+                    model_identity = "Qwen3-TTS"
+                    model_version = model_value.strip()
+                else:
+                    model_identity, model_version = parse_model_identity_version(model_value.strip())
         meta = node.get("_meta", {})
         title = meta.get("title") if isinstance(meta, dict) else None
-        if isinstance(title, str) and title.strip() and backend_version == "unknown":
+        if (
+            class_type in {"FB_Qwen3TTSCustomVoice", "FB_Qwen3TTSVoiceDesign"}
+            and isinstance(title, str)
+            and title.strip()
+        ):
             backend_version = title.strip()
 
     software_version = os.environ.get("AUTOAUDIO_VERSION", "dev")
@@ -586,7 +592,7 @@ def resolve_metadata(args: argparse.Namespace, input_book: str, source_mode: str
 
 
 def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate audiobook audio from EPUB or plain text using ComfyUI/VibeVoice.")
+    parser = argparse.ArgumentParser(description="Generate audiobook audio from EPUB or plain text using ComfyUI/Qwen3-TTS.")
     parser.add_argument("--input-book", default=str(project_root / "pg35-images-3.epub"), help="Path to the input EPUB/TXT/MD file.")
     parser.add_argument("--output-dir", default=str(project_root / "audiobook_output"), help="Directory for generated audio.")
     parser.add_argument("--source-mode", choices=["auto", "epub", "text"], default="auto")
@@ -596,11 +602,21 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--chapters-per-part", type=int, default=5)
     parser.add_argument("--max-words-per-chunk", type=int, default=250)
     parser.add_argument("--chunks-per-batch", type=int, default=7)
-    parser.add_argument("--diffusion-steps", type=int, default=25)
-    parser.add_argument("--temperature", type=float, default=0.95)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--cfg-scale", type=float, default=1.3)
-    parser.add_argument("--free-memory-after-generate", action="store_true")
+    parser.add_argument("--voice-mode", choices=["preset", "design"], default="preset")
+    parser.add_argument("--speaker", default="Eric", help="Qwen CustomVoice speaker used in preset mode.")
+    parser.add_argument("--voice-instruct", default="", help="Style guidance or required VoiceDesign description.")
+    parser.add_argument("--model-choice", default="1.7B")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--precision", default="bf16")
+    parser.add_argument("--language", default="English")
+    parser.add_argument("--seed", type=int, default=268583702137267)
+    parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--top-p", type=float, default=0.8)
+    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--repetition-penalty", type=float, default=1.05)
+    parser.add_argument("--attention", choices=["sdpa", "flash_attn"], default="sdpa")
+    parser.add_argument("--unload-model-after-generate", action="store_true")
     parser.add_argument("--output-format", choices=["flac", "mp3", "m4b"], default="flac")
     parser.add_argument("--fetch-metadata", action="store_true", help="Optional online metadata lookup (disabled by default).")
     parser.add_argument("--gutenberg-id", default="", help="Optional explicit Gutenberg ID for online metadata fetch.")
@@ -645,17 +661,29 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     except ValueError as exc:
         raise InputValidationError(str(exc)) from exc
 
-    settings = GenerationSettings(
-        max_words_per_chunk=args.max_words_per_chunk,
-        chunks_per_batch=args.chunks_per_batch,
-        diffusion_steps=args.diffusion_steps,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        cfg_scale=args.cfg_scale,
-        free_memory_after_generate=args.free_memory_after_generate,
-    )
-    workflow_template = load_workflow_template(config.workflow_path)
-    workflow_hash = sha256_file(config.workflow_path)
+    try:
+        settings = GenerationSettings(
+            voice_mode=args.voice_mode,
+            speaker=args.speaker,
+            instruct=args.voice_instruct,
+            model_choice=args.model_choice,
+            device=args.device,
+            precision=args.precision,
+            language=args.language,
+            seed=args.seed,
+            max_new_tokens=args.max_new_tokens,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            temperature=args.temperature,
+            repetition_penalty=args.repetition_penalty,
+            attention=args.attention,
+            unload_model_after_generate=args.unload_model_after_generate,
+        )
+    except ValueError as exc:
+        raise InputValidationError(f"Invalid Qwen generation settings: {exc}") from exc
+    workflow_path = config.workflow_path_for(settings.voice_mode)
+    workflow_template = load_workflow_template(workflow_path)
+    workflow_hash = sha256_file(workflow_path)
     provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template)
     comfyui_client = build_comfyui_client(config)
     checkpoint_store = CheckpointStore(state_dir=state_dir)
@@ -670,11 +698,21 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "chapters_per_part": args.chapters_per_part,
             "max_words_per_chunk": args.max_words_per_chunk,
             "chunks_per_batch": args.chunks_per_batch,
-            "diffusion_steps": args.diffusion_steps,
+            "voice_mode": settings.voice_mode,
+            "speaker": settings.speaker,
+            "voice_instruct": settings.instruct,
+            "model_choice": settings.model_choice,
+            "device": settings.device,
+            "precision": settings.precision,
+            "language": settings.language,
+            "seed": settings.seed,
+            "max_new_tokens": settings.max_new_tokens,
+            "top_k": settings.top_k,
             "temperature": args.temperature,
             "top_p": args.top_p,
-            "cfg_scale": args.cfg_scale,
-            "free_memory_after_generate": args.free_memory_after_generate,
+            "repetition_penalty": settings.repetition_penalty,
+            "attention": settings.attention,
+            "unload_model_after_generate": settings.unload_model_after_generate,
             "output_format": args.output_format,
             "fetch_metadata": args.fetch_metadata,
             "gutenberg_id": args.gutenberg_id,

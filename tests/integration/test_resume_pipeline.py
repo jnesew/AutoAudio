@@ -53,11 +53,21 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             chapters_per_part=10,
             max_words_per_chunk=4,
             chunks_per_batch=1,
-            diffusion_steps=25,
-            temperature=0.95,
-            top_p=0.95,
-            cfg_scale=1.3,
-            free_memory_after_generate=False,
+            voice_mode="preset",
+            speaker="Eric",
+            voice_instruct="",
+            model_choice="1.7B",
+            device="auto",
+            precision="bf16",
+            language="English",
+            seed=1234,
+            max_new_tokens=2048,
+            temperature=1.0,
+            top_p=0.8,
+            top_k=20,
+            repetition_penalty=1.05,
+            attention="sdpa",
+            unload_model_after_generate=False,
             output_format="flac",
             fetch_metadata=False,
             gutenberg_id="",
@@ -88,7 +98,7 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             output_dir = tmp / "output"
             project_root = tmp / "project"
             (project_root / "resources" / "workflows").mkdir(parents=True)
-            (project_root / "resources" / "workflows" / "vibevoice_single_speaker.json").write_text("{}", encoding="utf-8")
+            (project_root / "resources" / "workflows" / "qwen3_tts_custom_voice.json").write_text("{}", encoding="utf-8")
 
             config = AppConfig(project_root=project_root, comfyui_mode="spoof")
 

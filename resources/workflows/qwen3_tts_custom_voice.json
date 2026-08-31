@@ -1,0 +1,39 @@
+{
+  "31": {
+    "inputs": {
+      "audio": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "PreviewAudio",
+    "_meta": {
+      "title": "Preview Audio"
+    }
+  },
+  "39": {
+    "inputs": {
+      "text": "",
+      "speaker": "Eric",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "English",
+      "seed": 268583702137267,
+      "instruct": "",
+      "max_new_tokens": 2048,
+      "top_p": 0.8,
+      "top_k": 20,
+      "temperature": 1.0,
+      "repetition_penalty": 1.05,
+      "attention": "sdpa",
+      "unload_model_after_generate": false,
+      "custom_model_path": "",
+      "custom_speaker_name": ""
+    },
+    "class_type": "FB_Qwen3TTSCustomVoice",
+    "_meta": {
+      "title": "Qwen3-TTS CustomVoice"
+    }
+  }
+}

@@ -81,7 +81,6 @@ class SpoofComfyUIClient:
         *,
         workflow_template: dict[str, Any],
         text_segment: str,
-        reference_voice: str,
         settings: GenerationSettings,
         timeout_seconds: float | None = None,
     ) -> AudioArtifact:
@@ -89,7 +88,6 @@ class SpoofComfyUIClient:
         workflow = build_runtime_workflow(
             workflow_template=workflow_template,
             text_segment=text_segment,
-            reference_voice=reference_voice,
             settings=settings,
         )
 
