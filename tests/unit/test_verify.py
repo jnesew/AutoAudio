@@ -9,7 +9,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from provenance.ai_marking import write_ai_marking_manifest
+from provenance.ai_marking import AI_MARKING_COMMENT, write_ai_marking_manifest
 from provenance.verify import AI_TAGS, _iter_audio_files, verify_artifact
 
 
@@ -32,6 +32,16 @@ def test_verifier_accepts_matching_final_hash_and_tags(tmp_path):
     tags = {**AI_TAGS, "ai_marking": "audio_watermark+metadata+manifest"}
 
     with patch("provenance.verify._probe_tags", return_value=tags):
+        ok, errors = verify_artifact(artifact)
+
+    assert ok is True
+    assert errors == []
+
+
+def test_verifier_accepts_portable_comment_marking(tmp_path):
+    artifact = _marked_artifact(tmp_path / "book.m4b")
+
+    with patch("provenance.verify._probe_tags", return_value={"comment": AI_MARKING_COMMENT}):
         ok, errors = verify_artifact(artifact)
 
     assert ok is True

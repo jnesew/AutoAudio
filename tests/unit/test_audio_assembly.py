@@ -25,6 +25,7 @@ from provenance.ai_marking import (
     validate_watermarked_artifact,
     write_ai_marking_manifest,
 )
+from provenance.verify import verify_artifact
 
 
 LOGGER = logging.getLogger("test.audio_assembly")
@@ -56,6 +57,26 @@ def _make_marked_tone(path: Path, *, duration_ms: int = 240, frequency: int = 44
         watermark_applied=True,
         watermark_verified=True,
         watermark_detail="test evidence",
+    )
+    return path
+
+
+def _make_cover(path: Path) -> Path:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=32x32:d=0.04",
+            "-frames:v",
+            "1",
+            str(path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     return path
 
@@ -186,6 +207,47 @@ def test_real_final_encoding_supports_each_output_format(tmp_path, extension, ex
     assert probe.stdout.strip() == expected_codec
     assert get_audio_duration_ms(output) >= 350
     assert manifest_path_for(output).exists()
+
+
+@pytest.mark.parametrize("extension", ["flac", "mp3", "m4b"])
+def test_real_stitched_encoding_keeps_cover_with_chapter_metadata(tmp_path, extension):
+    master = _make_marked_tone(tmp_path / "part-master.flac", duration_ms=400)
+    cover = _make_cover(tmp_path / "cover.jpg")
+    output = tmp_path / f"part.{extension}"
+
+    encode_lossless_master(
+        master,
+        output,
+        metadata={"title": "Part 1", "artist": "Narrator"},
+        chapter_markers=(ChapterMarker(title="Chapter 1", start_ms=0, end_ms=400),),
+        cover_image=str(cover),
+        logger=LOGGER,
+    )
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name:stream_disposition=attached_pic",
+            "-of",
+            "json",
+            str(output),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    stream = json.loads(probe.stdout)["streams"][0]
+    assert stream["codec_name"] == "mjpeg"
+    assert stream["disposition"]["attached_pic"] == 1
+    assert manifest_path_for(output).exists()
+    verified, errors = verify_artifact(output)
+    assert verified, errors
 
 
 def test_final_encoding_retries_without_invalid_cover_mapping(tmp_path):
