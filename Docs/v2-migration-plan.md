@@ -1,5 +1,7 @@
 # AutoAudio v2 migration plan
 
+> Implementation status: stages 1–9 are complete. Release qualification is continuing on `release/v2.0.0`; see [release-checklist.md](release-checklist.md) for current evidence and remaining gates.
+
 ## Release intent
 
 AutoAudio v2 intentionally breaks compatibility with the VibeVoice/reference-audio pipeline. It removes voice cloning and adopts Qwen3-TTS through ComfyUI with two narrator modes:

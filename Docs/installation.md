@@ -1,0 +1,71 @@
+# Installation and ComfyUI setup
+
+## Python environment
+
+AutoAudio v2 requires Python 3.11 or newer. A virtual environment is recommended:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+`requirements.txt` pins `pubparser` v0.1.1 to an immutable commit. The remaining direct dependencies are compatibility ranges until the v2 release environment is locked and recorded.
+
+PySide6 is required only for the desktop GUI. AudioSeal, PyTorch, librosa, SoundFile, and NumPy provide non-audible watermark embedding and verification.
+
+## System tools
+
+Install `ffmpeg` and `ffprobe` and make both commands available on `PATH`. AutoAudio uses them for audio normalization, lossless assembly, final encoding, and metadata.
+
+Optional C2PA signing requires `c2patool` or a compatible executable selected with `--provenance-tool`.
+
+## ComfyUI contract
+
+AutoAudio expects a running ComfyUI server at `127.0.0.1:8188` by default. Change it with `--comfyui-server-address` or the GUI runtime settings.
+
+The server must provide these non-cloning node classes:
+
+- `FB_Qwen3TTSCustomVoice`
+- `FB_Qwen3TTSVoiceDesign`
+
+AutoAudio bundles compatible workflow templates:
+
+- `resources/workflows/qwen3_tts_custom_voice.json`
+- `resources/workflows/qwen3_tts_voice_design.json`
+
+Preset narration supports the Qwen 0.6B and 1.7B CustomVoice models. VoiceDesign requires the 1.7B VoiceDesign model. Model files and ComfyUI itself are external runtime components and are not distributed by AutoAudio.
+
+AutoAudio validates workflows before submission and rejects voice-cloning nodes or reference-audio inputs.
+
+## Connectivity check
+
+Start ComfyUI before AutoAudio. The normal runtime mode is `network`:
+
+```bash
+python auto_audiobook.py \
+  --input-book /path/to/book.epub \
+  --output-dir /path/to/output \
+  --comfyui-mode network \
+  --comfyui-server-address 127.0.0.1:8188
+```
+
+`spoof` mode exercises orchestration without a live model and is intended for tests and development:
+
+```bash
+python auto_audiobook.py \
+  --input-book /path/to/short-test.txt \
+  --output-dir /path/to/test-output \
+  --comfyui-mode spoof
+```
+
+## Troubleshooting
+
+- **Cannot connect to ComfyUI:** confirm the server address and that the Qwen nodes loaded without errors.
+- **Missing audio output:** verify the selected model exists and matches the narrator mode.
+- **Watermarking failure:** confirm the installed PyTorch and AudioSeal stack works on the selected platform. AutoAudio rejects unverified segment output.
+- **GUI unavailable:** install PySide6 in the active Python environment.
+- **Metadata lookup fails:** online Gutenberg metadata is optional; omit `--fetch-metadata` to remain offline.
+
+For redistribution and exact license-notice requirements, see [../THIRD_PARTY_DEPENDENCIES.md](../THIRD_PARTY_DEPENDENCIES.md).
