@@ -12,7 +12,7 @@ if __package__ in {None, ""}:
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from provenance.ai_marking import AI_MARKING_SCHEMA
+from provenance.ai_marking import AI_MARKING_COMMENT, AI_MARKING_SCHEMA
 
 
 AI_TAGS = {
@@ -108,13 +108,18 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
         errors.append(f"ffprobe failed for {artifact}: {exc}")
         tags = {}
 
-    for key, expected in AI_TAGS.items():
-        actual = tags.get(key)
-        if actual is None or actual.lower() != expected.lower():
-            errors.append(f"metadata tag mismatch for {artifact.name}: {key}={actual!r}, expected {expected!r}")
+    portable_comment_marking = (
+        artifact.suffix.lower() in {".m4b", ".m4a", ".mp4"}
+        and tags.get("comment", "").casefold() == AI_MARKING_COMMENT.casefold()
+    )
+    if not portable_comment_marking:
+        for key, expected in AI_TAGS.items():
+            actual = tags.get(key)
+            if actual is None or actual.lower() != expected.lower():
+                errors.append(f"metadata tag mismatch for {artifact.name}: {key}={actual!r}, expected {expected!r}")
 
-    if not tags.get("ai_marking", ""):
-        errors.append(f"metadata tag missing for {artifact.name}: ai_marking")
+        if not tags.get("ai_marking", ""):
+            errors.append(f"metadata tag missing for {artifact.name}: ai_marking")
 
     return (not errors), errors
 

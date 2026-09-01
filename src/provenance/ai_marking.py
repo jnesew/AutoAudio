@@ -12,6 +12,10 @@ from core.checkpoint import sha256_file
 
 
 AI_MARKING_SCHEMA = "autoaudio.ai_marking.v2"
+AI_MARKING_COMMENT = (
+    "AutoAudio AI marking: ai_generated=true; ai_system=AutoAudio; "
+    "ai_provider=ComfyUI; ai_marking=audio_watermark+metadata+manifest"
+)
 
 
 @dataclass(frozen=True)

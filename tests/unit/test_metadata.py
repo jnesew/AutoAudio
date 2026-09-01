@@ -9,7 +9,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from core.metadata_adapters import M4bMetadataAdapter, Mp3MetadataAdapter, adapter_for_extension
+from core.metadata_adapters import MetadataContext, M4bMetadataAdapter, Mp3MetadataAdapter, adapter_for_extension
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
 from metadata.source_mode import detect_source_mode
@@ -55,6 +55,7 @@ class MetadataAdapterTests(unittest.TestCase):
     def test_m4b_output_flags_include_ipod(self) -> None:
         adapter = M4bMetadataAdapter()
         self.assertIn("ipod", adapter.ffmpeg_output_args())
+        self.assertNotIn("use_metadata_tags", adapter.ffmpeg_metadata_args(MetadataContext()))
 
 
 if __name__ == "__main__":

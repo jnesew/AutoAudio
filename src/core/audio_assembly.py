@@ -278,12 +278,20 @@ def _encoding_command(
     )
     command = ["ffmpeg", "-y", "-i", master_path]
     next_input = 1
+    metadata_input: int | None = None
     if metadata_path is not None:
-        command.extend(["-i", str(metadata_path), "-map_metadata", str(next_input)])
+        command.extend(["-i", str(metadata_path)])
+        metadata_input = next_input
         next_input += 1
     if include_cover and cover_image:
         command.extend(["-i", cover_image])
         cover_input = next_input
+
+    # Mapping options belong to the output. Keep them after every input so a
+    # later cover input is not parsed as the target of an output-only option.
+    if metadata_input is not None:
+        command.extend(["-map_metadata", str(metadata_input), "-map_chapters", str(metadata_input)])
+    if include_cover and cover_image:
         command.extend(
             [
                 "-map",
