@@ -6,8 +6,13 @@ import io
 import logging
 import os
 import subprocess
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
+
+
+_AUDIOSEAL_JIT_WARNING = r"`torch\.jit\.script` is not supported in Python 3\.14\+"
+_AUDIOSEAL_WEIGHT_NORM_WARNING = r"`torch\.nn\.utils\.weight_norm` is deprecated"
 
 
 def _derive_16bit_message(secret_key: str, content_id: str, source_sha256: str):
@@ -21,10 +26,29 @@ def _derive_16bit_message(secret_key: str, content_id: str, source_sha256: str):
 
 @lru_cache(maxsize=2)
 def _load_audioseal_models(device: str):
-    from audioseal import AudioSeal
+    # AudioSeal 0.2.0 imports TorchScript-decorated streaming helpers and uses
+    # the legacy weight_norm API while translating its published checkpoints.
+    # Both paths still work for eager inference, but PyTorch emits warnings on
+    # Python 3.14. Keep the suppression limited to AudioSeal import/model load
+    # so unrelated FutureWarnings remain visible.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_AUDIOSEAL_JIT_WARNING,
+            category=FutureWarning,
+            module=r"torch\.jit\._script",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=_AUDIOSEAL_WEIGHT_NORM_WARNING,
+            category=FutureWarning,
+            module=r"torch\.nn\.utils\.weight_norm",
+        )
 
-    generator = AudioSeal.load_generator("audioseal_wm_16bits")
-    detector = AudioSeal.load_detector("audioseal_detector_16bits")
+        from audioseal import AudioSeal
+
+        generator = AudioSeal.load_generator("audioseal_wm_16bits")
+        detector = AudioSeal.load_detector("audioseal_detector_16bits")
     for model in (generator, detector):
         try:
             model.to(device)
@@ -83,13 +107,7 @@ def watermark_audio_bytes(
     wav = torch.from_numpy(wav_np).float().unsqueeze(0).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        try:
-            watermark = generator.get_watermark(wav, sr, message=msg)
-        except TypeError:
-            try:
-                watermark = generator.get_watermark(wav, sample_rate=sr, message=msg)
-            except TypeError:
-                watermark = generator.get_watermark(wav, sr)
+        watermark = generator.get_watermark(wav, message=msg)
         watermarked = torch.clamp(wav + watermark, -1.0, 1.0)
 
     out_io = io.BytesIO()
@@ -97,13 +115,10 @@ def watermark_audio_bytes(
     watermarked_wav_bytes = out_io.getvalue()
 
     if verify:
-        verify_np, verify_sr = librosa.load(io.BytesIO(watermarked_wav_bytes), sr=24000, mono=True)
+        verify_np, _ = librosa.load(io.BytesIO(watermarked_wav_bytes), sr=24000, mono=True)
         verify_tensor = torch.from_numpy(verify_np).float().unsqueeze(0).unsqueeze(0).to(device)
         with torch.no_grad():
-            try:
-                prob, detected_msg = detector.detect_watermark(verify_tensor, verify_sr)
-            except TypeError:
-                prob, detected_msg = detector.detect_watermark(verify_tensor)
+            prob, detected_msg = detector.detect_watermark(verify_tensor)
 
         if _as_float(prob) < verify_threshold:
             raise RuntimeError("AudioSeal verification failed: detector confidence below threshold.")
@@ -139,4 +154,3 @@ def watermark_audio_bytes_best_effort(
     except Exception as exc:
         log.warning("Audio watermarking skipped for %s (%s)", content_id, exc)
         return WatermarkResult(applied=False, verified=False, method="audioseal", detail=str(exc)), audio_data
-

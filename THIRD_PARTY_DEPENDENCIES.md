@@ -14,7 +14,7 @@ Third-party dependencies are licensed under their own terms.
 | torch | unpinned | BSD-3-Clause plus bundled third-party notices | Tensor runtime used by AudioSeal. Preserve the selected wheel's `LICENSE` and `NOTICE`; the upstream top-level license is copied at `LICENSES/pytorch-BSD-3-Clause.txt`. |
 | librosa | unpinned | ISC plus dependency notices | Audio decoding and resampling for watermarking. |
 | soundfile | unpinned | BSD-3-Clause for PySoundFile; libsndfile is LGPL-2.1-or-later | Audio serialization for watermarking; binary wheels may bundle libsndfile. |
-| audioseal | unpinned | MIT | Non-audible audio watermarking. Model-weight terms must also be reviewed for the selected distribution. |
+| audioseal | `==0.2.0` | MIT | Non-audible audio watermarking. Model-weight terms must also be reviewed for the selected distribution. |
 
 `LICENSES/third-party-licenses.md` is an installed-environment snapshot, not a lock file. See `LICENSES/README.md` for its scope and known metadata limitations.
 
