@@ -34,6 +34,9 @@ def test_checkpoint_v2_round_trip(tmp_path):
     assert loaded["version"] == 2
     assert loaded["compatibility"]["workflow_sha256"] == "workflow-hash"
     assert loaded["plan"]["sha256"] == "plan-hash"
+    assert loaded["artifacts"]["silence"] == {}
+    assert loaded["artifacts"]["chapter_masters"] == {}
+    assert loaded["artifacts"]["part_masters"] == {}
 
 
 def test_checkpoint_v1_is_explicitly_incompatible(tmp_path):

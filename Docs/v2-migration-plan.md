@@ -35,7 +35,8 @@ Planned stages:
    - Bind the parser/normalizer policy to checkpoint compatibility.
 7. `refactor/v2-audio-assembly`
    - Assemble disclosure, narration, and silence without text tokens such as `[pause]`.
-   - Reduce avoidable lossy re-encoding and clean intermediate manifests.
+   - Stream normalized FLAC masters through ffmpeg instead of buffering full raw chapters or parts in Python.
+   - Encode MP3/M4B outputs once, build parts from lossless masters, and clean intermediate audio/manifest pairs.
 8. `feature/v2-gui-cli`
    - Replace the reference-voice picker with narrator-profile controls.
    - Add effective cooperative cancellation and complete CLI parity.
@@ -74,6 +75,8 @@ Checkpoint schema v1 is deliberately not resumable by v2. `--resume yes` reports
 - An audible synthetic-audio disclosure appears exactly once at the beginning of each produced chapter.
 - The disclosure is a controlled neutral asset or other deterministic source; it is not synthesized separately with a designed narrator for each segment.
 - Every generated narration segment is non-audibly watermarked before it enters chapter assembly.
+- Assembly rejects missing, tampered, or unverified watermark evidence and records source-artifact inheritance in output sidecars.
+- Disclosure, segment, and chapter spacing comes from explicit lossless silence assets; narration text never contains pause tokens.
 - Chapter and part containers retain AI metadata and optional C2PA manifests.
 - The checkpoint records hashes after all final mutations, including provenance embedding.
 

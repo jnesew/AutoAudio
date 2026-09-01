@@ -21,8 +21,10 @@ if "websocket" not in sys.modules:
     websocket_stub.create_connection = lambda *_args, **_kwargs: None
     sys.modules["websocket"] = websocket_stub
 
+from core.checkpoint import CheckpointStore
 from core.config import AppConfig
 from core.pipeline import run_pipeline
+from provenance.ai_marking import write_ai_marking_manifest
 
 
 class ResumePipelineIntegrationTests(unittest.TestCase):
@@ -37,6 +39,9 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             chapters_per_part=10,
             target_words_per_segment=4,
             max_words_per_segment=4,
+            disclosure_gap_ms=700,
+            segment_gap_ms=150,
+            chapter_gap_ms=1000,
             narrator_profile="preset-eric-neutral",
             speaker="Eric",
             voice_instruct="",
@@ -91,13 +96,34 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             )
 
             config = AppConfig(project_root=project_root, comfyui_mode="spoof")
-            combined_inputs: list[list[str]] = []
+            assembled_inputs: list[list[str]] = []
 
-            def fake_combine(audio_files, output_filename, metadata=None, chapter_titles=None, cover_image=None):
-                del metadata, chapter_titles, cover_image
-                combined_inputs.append([str(path) for path in audio_files])
-                Path(output_filename).write_bytes(b"combined")
-                return True
+            def fake_assemble(audio_files, output_filename, **kwargs):
+                del kwargs
+                assembled_inputs.append([str(path) for path in audio_files])
+                Path(output_filename).write_bytes(b"lossless-master")
+                write_ai_marking_manifest(
+                    output_filename,
+                    content_id=Path(output_filename).stem,
+                    metadata_embedded=True,
+                    watermark_applied=True,
+                    watermark_verified=True,
+                    watermark_detail="test",
+                )
+                return str(output_filename)
+
+            def fake_final_encode(master_path, output_filename, **kwargs):
+                del master_path, kwargs
+                Path(output_filename).write_bytes(b"final-audio")
+                write_ai_marking_manifest(
+                    output_filename,
+                    content_id=Path(output_filename).stem,
+                    metadata_embedded=True,
+                    watermark_applied=True,
+                    watermark_verified=True,
+                    watermark_detail="test",
+                )
+                return str(output_filename)
 
             def fake_disclosure_asset(**kwargs):
                 disclosure_path = Path(kwargs["state_dir"]) / "chapter_disclosure.flac"
@@ -121,7 +147,11 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0)
 
             marking_result = SimpleNamespace(applied=True, verified=True, detail="test watermark")
-            with patch("core.pipeline.combine_audio_files", side_effect=fake_combine), patch(
+            with patch("core.pipeline.assemble_lossless_master", side_effect=fake_assemble), patch(
+                "core.pipeline.encode_lossless_master", side_effect=fake_final_encode
+            ), patch(
+                "core.pipeline.chapter_markers_for_files", return_value=()
+            ), patch(
                 "core.pipeline.process_segment", side_effect=interrupted_process_segment
             ), patch("core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking_result, b"marked")), patch(
                 "core.pipeline.subprocess.run", side_effect=fake_encode
@@ -139,7 +169,11 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 return (b"RIFF....FAKEAUDIO-2", ".flac")
 
             second_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="yes")
-            with patch("core.pipeline.combine_audio_files", side_effect=fake_combine), patch(
+            with patch("core.pipeline.assemble_lossless_master", side_effect=fake_assemble), patch(
+                "core.pipeline.encode_lossless_master", side_effect=fake_final_encode
+            ), patch(
+                "core.pipeline.chapter_markers_for_files", return_value=()
+            ), patch(
                 "core.pipeline.process_segment", side_effect=normal_process_segment
             ), patch("core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking_result, b"marked")), patch(
                 "core.pipeline.subprocess.run", side_effect=fake_encode
@@ -156,9 +190,34 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             self.assertTrue(checkpoint_file.exists())
             self.assertTrue((output_dir / ".autoaudio_state" / "book_plan.json").exists())
             self.assertIn("Part_001.flac", "\n".join([p.name for p in output_dir.iterdir()]))
-            chapter_inputs = [files for files in combined_inputs if Path(files[0]).name == "chapter_disclosure.flac"]
+            chapter_inputs = [files for files in assembled_inputs if Path(files[0]).name == "chapter_disclosure.flac"]
             self.assertTrue(chapter_inputs)
             self.assertTrue(all(sum(Path(path).name == "chapter_disclosure.flac" for path in files) == 1 for files in chapter_inputs))
+            self.assertTrue(all(Path(files[1]).name.startswith("disclosure_gap_") for files in chapter_inputs))
+            self.assertFalse(list((output_dir / ".segments").glob("*.ai.json")))
+            self.assertFalse(list((output_dir / ".segments").glob("*.flac")))
+            self.assertFalse(list((output_dir / ".autoaudio_state" / "masters").glob("*")))
+
+            # A failure after a completed part may resume without its intentionally cleaned chapter masters.
+            checkpoint_store = CheckpointStore(output_dir / ".autoaudio_state")
+            completed_checkpoint = checkpoint_store.load()
+            self.assertFalse(completed_checkpoint["artifacts"]["chapter_masters"])
+            self.assertFalse(completed_checkpoint["artifacts"]["part_masters"])
+            completed_checkpoint["status"] = "failed"
+            checkpoint_store.save(completed_checkpoint)
+            third_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="yes")
+            with patch(
+                "core.pipeline.process_segment", side_effect=AssertionError("completed part regenerated narration")
+            ), patch(
+                "core.pipeline.assemble_lossless_master",
+                side_effect=AssertionError("completed part was assembled again"),
+            ), patch(
+                "core.pipeline.encode_lossless_master",
+                side_effect=AssertionError("completed part was encoded again"),
+            ), patch(
+                "core.pipeline.ensure_disclosure_asset", side_effect=fake_disclosure_asset
+            ):
+                run_pipeline(third_args, config)
 
 
 if __name__ == "__main__":
