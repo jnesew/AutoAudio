@@ -6,12 +6,13 @@ This document tracks evidence required before `release/v2.0.0` can merge into `m
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Unit and spoof/integration suite | Passed | 112 tests after stitched-cover regression fix |
+| Unit and spoof/integration suite | Passed | 117 tests after C2PA compatibility fix |
 | Import and compile checks | Passed | Python 3.12 release workspace |
 | Workflow fixtures | Passed | CustomVoice and VoiceDesign adapters covered |
 | Synthetic EPUB fixtures | Passed | pubparser adapter tests |
 | Real Project Gutenberg EPUB | Passed | pubparser v0.1.1 parsed book 84 with metadata, cover, and normalization |
 | Stitched cover art | Passed | Real FFmpeg encodes retain chapter metadata, AI marking, and attached JPEG artwork in FLAC, MP3, and M4B |
+| C2PA container compatibility | Passed | Live `c2patool 0.27.16` ES256 signing and parse-back succeeded for FLAC, MP3, and M4B; cover art and AI-marking audit remained valid |
 | Source-archive smoke | Passed on candidate | Commit `0a03036`; archive SHA-256 `ff797e4ff312e71366ce1ac08f7da59d6e57ceb46db5734b59e16b6552c40b08`; 108 tests plus CLI help/version |
 | Clean-environment dependency install | Pending | Run after the final dependency resolution is selected |
 | Exact dependency inventory | Pending | Capture the final tested platform resolution |
@@ -31,7 +32,7 @@ This document tracks evidence required before `release/v2.0.0` can merge into `m
 | Disclosure placement | Passed | Maintainer manual test |
 | AudioSeal embedding/detection | Passed indirectly | Strict assembly completed from verified segments; run retained-output verifier for final audit |
 | Complete-book run | In progress | Maintainer processing run |
-| C2PA signing and verification | Pending | Requires real certificate/key/toolchain test |
+| C2PA signing and verification | In progress | Live test credentials pass across FLAC, MP3, and M4B; maintainer certificate and end-to-end pipeline test remain |
 
 ## Release actions
 

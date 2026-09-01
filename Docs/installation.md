@@ -19,7 +19,7 @@ PySide6 is required only for the desktop GUI. AudioSeal, PyTorch, librosa, Sound
 
 Install `ffmpeg` and `ffprobe` and make both commands available on `PATH`. AutoAudio uses them for audio normalization, lossless assembly, final encoding, and metadata.
 
-Optional C2PA signing requires `c2patool` or a compatible executable selected with `--provenance-tool`.
+Optional C2PA signing requires `c2patool` or a compatible executable selected with `--provenance-tool`. The release candidate is qualified against `c2patool 0.27.16`. AutoAudio supplies signing credentials through a private temporary manifest as required by current `c2patool`; it also handles the tool's unsigned-M4B extension limitation internally.
 
 ## ComfyUI contract
 
