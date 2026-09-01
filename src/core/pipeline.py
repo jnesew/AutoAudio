@@ -11,10 +11,6 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-import ebooklib
-from bs4 import BeautifulSoup
-from ebooklib import epub
-
 from comfyui.client import (
     ComfyUIClient,
     ComfyUIClientError,
@@ -47,7 +43,14 @@ from core.metadata_adapters import MetadataContext, adapter_for_extension
 from core.narrator import NarratorCatalog, NarratorProfileError
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
 from core.segmentation import SegmentPolicy, default_segment_policy, segment_text_for_qwen
-from metadata.extractors import extract_epub_metadata, extract_text_fallback_metadata
+from metadata.epub_parser import (
+    EPUB_PARSER_POLICY_VERSION,
+    EpubParseError,
+    ParsedEpub,
+    parse_epub,
+    write_cover_art,
+)
+from metadata.extractors import extract_text_fallback_metadata
 from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
@@ -145,31 +148,7 @@ def extract_text_blocks_from_epub(epub_path: str) -> list[tuple[str, str]]:
         print(f"ERROR: File not found: {epub_path}")
         return []
 
-    book = epub.read_epub(epub_path)
-    blocks: list[tuple[str, str]] = []
-
-    for spine_item in book.spine:
-        item_id = spine_item[0] if isinstance(spine_item, tuple) else spine_item
-        item = book.get_item_with_id(item_id)
-        if not item or item.get_type() != ebooklib.ITEM_DOCUMENT:
-            continue
-
-        soup = BeautifulSoup(item.get_body_content(), "html.parser")
-        for script in soup(["script", "style"]):
-            script.extract()
-
-        text = soup.get_text(separator="\n")
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        clean_text = " ".join(chunk for chunk in chunks if chunk)
-
-        title_tag = soup.find("h1") or soup.find("h2") or soup.find("title")
-        title = title_tag.get_text().strip() if title_tag else item.get_id()
-
-        if len(clean_text) > 50:
-            blocks.append((title, clean_text))
-
-    return blocks
+    return list(parse_epub(epub_path).text_blocks)
 
 
 def extract_text_blocks_from_text_file(text_path: str) -> list[tuple[str, str]]:
@@ -260,12 +239,7 @@ def build_qwen_book_plan(
     """Freeze Qwen-aware semantic segments so a run cannot drift on resume."""
     planned_chapters: list[PlannedChapter] = []
     for chapter_index, (title, text) in enumerate(chapters):
-        skipped_reason = None
-        segment_texts: list[str] = []
-        if "Project Gutenberg" in text[:500]:
-            skipped_reason = "likely Project Gutenberg preamble"
-        else:
-            segment_texts = segment_text_for_qwen(text, segment_policy)
+        segment_texts = segment_text_for_qwen(text, segment_policy)
 
         planned_chapters.append(
             PlannedChapter(
@@ -279,7 +253,7 @@ def build_qwen_book_plan(
                     )
                     for segment_index, segment_text in enumerate(segment_texts)
                 ),
-                skipped_reason=skipped_reason,
+                skipped_reason=None,
             )
         )
 
@@ -614,44 +588,39 @@ def safe_name(text: str) -> str:
 
 def extract_cover_art(epub_path: str, output_dir: str):
     try:
-        book = epub.read_epub(epub_path)
-        cover_item = None
-
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_COVER:
-                cover_item = item
-                break
-
-        if not cover_item:
-            for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
-                if "cover" in item.get_name().lower():
-                    cover_item = item
-                    break
-
-        if cover_item:
-            ext = os.path.splitext(cover_item.get_name())[1] or ".jpg"
-            cover_path = os.path.join(output_dir, f"cover{ext}")
-            with open(cover_path, "wb") as file:
-                file.write(cover_item.get_content())
+        cover_path = write_cover_art(parse_epub(epub_path), output_dir)
+        if cover_path:
             print(f"   [Cover Art] Extracted: {cover_path}")
-            return cover_path
-
+        return cover_path
     except Exception as exc:
         logging.getLogger("autoaudio.run").warning("Cover art extraction failed: %s", exc)
 
     return None
 
 
-def resolve_metadata(args: argparse.Namespace, input_book: str, source_mode: str, output_dir: str) -> BookMetadata:
+def resolve_metadata(
+    args: argparse.Namespace,
+    input_book: str,
+    source_mode: str,
+    output_dir: str,
+    *,
+    parsed_epub: ParsedEpub | None = None,
+) -> BookMetadata:
     fallback = BookMetadata(title=os.path.splitext(os.path.basename(input_book))[0], author="Unknown")
 
     if source_mode == "epub":
         try:
-            embedded = extract_epub_metadata(input_book)
+            parsed_epub = parsed_epub or parse_epub(input_book)
+            embedded = parsed_epub.metadata
         except Exception as exc:
             raise MetadataExtractionError(f"Embedded EPUB metadata extraction failed for {input_book}: {exc}") from exc
-        cover = extract_cover_art(input_book, output_dir)
+        try:
+            cover = write_cover_art(parsed_epub, output_dir)
+        except Exception as exc:
+            logging.getLogger("autoaudio.run").warning("Cover art extraction failed: %s", exc)
+            cover = None
         if cover:
+            print(f"   [Cover Art] Extracted: {cover}")
             embedded = BookMetadata(**{**embedded.__dict__, "cover_image_path": cover})
     else:
         embedded = extract_text_fallback_metadata(input_book)
@@ -811,6 +780,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     settings_hash = stable_settings_hash(
         {
             "source_mode": source_mode,
+            "source_parser_policy": EPUB_PARSER_POLICY_VERSION if source_mode == "epub" else "text-v1",
             "pages_per_chapter": args.pages_per_chapter,
             "target_words_per_chapter": args.target_words_per_chapter,
             "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
@@ -891,6 +861,26 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             logger.warning("Ignoring invalid book plan for automatic resume: %s", exc)
             book_plan = None
 
+    parsed_epub: ParsedEpub | None = None
+    if source_mode == "epub":
+        try:
+            parsed_epub = parse_epub(input_book)
+        except EpubParseError as exc:
+            raise InputValidationError(str(exc)) from exc
+        for diagnostic in parsed_epub.diagnostics:
+            log_method = logger.warning if diagnostic.severity in {"warning", "error", "fatal"} else logger.info
+            log_method(
+                "EPUB parser diagnostic code=%s resource=%s message=%s",
+                diagnostic.code,
+                diagnostic.resource or "-",
+                diagnostic.message,
+            )
+        if parsed_epub.gutenberg_detected:
+            logger.info(
+                "Project Gutenberg source detected; boilerplate normalization changed=%s",
+                parsed_epub.gutenberg_changed,
+            )
+
     if book_plan is not None:
         print(f"[Resume] Loaded checkpoint at {checkpoint_store.path}")
         checkpoint.setdefault("progress", {}).setdefault("completed_chapters", [])
@@ -903,7 +893,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint.setdefault("errors", [])
     else:
         if source_mode == "epub":
-            blocks = extract_text_blocks_from_epub(input_book)
+            assert parsed_epub is not None
+            blocks = list(parsed_epub.text_blocks)
             chapters = group_blocks_into_chapters(blocks, args.pages_per_chapter)
         else:
             blocks = extract_text_blocks_from_text_file(input_book)
@@ -951,7 +942,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint_store.save(checkpoint)
 
     print(f"--- Processing Book: {input_book} ---")
-    metadata = resolve_metadata(args, input_book, source_mode, output_dir)
+    metadata = resolve_metadata(args, input_book, source_mode, output_dir, parsed_epub=parsed_epub)
 
     part_index = 1
     part_chapter_files: list[tuple[str, str]] = []

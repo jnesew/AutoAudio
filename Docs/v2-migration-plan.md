@@ -29,15 +29,19 @@ Planned stages:
 5. `feature/v2-disclosure-watermarking`
    - Insert an audible disclosure once at the start of each chapter.
    - Retain non-audible AudioSeal marking for every generated narration segment.
-6. `refactor/v2-audio-assembly`
+6. `refactor/v2-pubparser`
+   - Replace EbookLib/Beautiful Soup EPUB handling with MIT-licensed pubparser.
+   - Parse text, metadata, cover data, diagnostics, and Gutenberg normalization through one adapter.
+   - Bind the parser/normalizer policy to checkpoint compatibility.
+7. `refactor/v2-audio-assembly`
    - Assemble disclosure, narration, and silence without text tokens such as `[pause]`.
    - Reduce avoidable lossy re-encoding and clean intermediate manifests.
-7. `feature/v2-gui-cli`
+8. `feature/v2-gui-cli`
    - Replace the reference-voice picker with narrator-profile controls.
    - Add effective cooperative cancellation and complete CLI parity.
-8. `fix/v2-metadata-packaging`
+9. `fix/v2-metadata-packaging`
    - Correct provenance model identity, final artifact hashes, filename safety, dependency notices, and documentation.
-9. `release/v2.0.0`
+10. `release/v2.0.0`
    - Run the release test matrix, migration review, and packaged smoke tests before merging to `main` and tagging.
 
 ## BookPlan and resume contract
@@ -75,4 +79,4 @@ Checkpoint schema v1 is deliberately not resumable by v2. `--resume yes` reports
 
 ## Stage acceptance gates
 
-Each stage must pass unit tests, spoof/integration tests, import/compile checks, and a focused review of checkpoint compatibility. Qwen stages additionally require exported-workflow fixture tests for both narrator modes. The release branch requires real ComfyUI smoke tests for preset and designed voices, interruption/resume at segment and chapter boundaries, all supported output formats, disclosure placement checks, and watermark verification.
+Each stage must pass unit tests, spoof/integration tests, import/compile checks, and a focused review of checkpoint compatibility. Parser changes additionally require synthetic EPUB fixtures and a checksum-reviewed Project Gutenberg real-world smoke test. Qwen stages require exported-workflow fixture tests for both narrator modes. The release branch requires real ComfyUI smoke tests for preset and designed voices, interruption/resume at segment and chapter boundaries, all supported output formats, disclosure placement checks, and watermark verification.

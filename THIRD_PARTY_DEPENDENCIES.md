@@ -7,10 +7,14 @@ Third-party dependencies are licensed under their own terms.
 
 | Package | Declared in | License (upstream) | Notes |
 |---|---|---|---|
-| beautifulsoup4 | `requirements.txt` | MIT License | HTML/text parsing from EPUB chapters. |
-| EbookLib | `requirements.txt` | AGPL-3.0-or-later | EPUB parsing library; review AGPL obligations for your distribution/use model. |
+| pubparser (`v0.1.0` tag; package metadata `0.1.0.dev0`) | `requirements.txt` | MIT License | EPUB parsing, metadata, cover discovery, and Project Gutenberg normalization. |
 | websocket-client | `requirements.txt` | Apache-2.0 | WebSocket client for ComfyUI events. |
 | PySide6 | `requirements.txt` | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only OR Commercial | Qt for Python licensing model; review LGPL/GPL/commercial obligations based on distribution strategy. |
+| numpy | `requirements.txt` | BSD-3-Clause | Numeric processing used by audio watermarking. |
+| torch | `requirements.txt` | BSD-3-Clause | Tensor runtime used by AudioSeal. |
+| librosa | `requirements.txt` | ISC | Audio decoding and resampling for watermarking. |
+| soundfile | `requirements.txt` | BSD-3-Clause | Audio serialization for watermarking. |
+| audioseal | `requirements.txt` | MIT License | Non-audible audio watermarking. |
 
 ## License hygiene checklist
 

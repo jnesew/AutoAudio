@@ -14,23 +14,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-# Lightweight stubs so pipeline can be imported without optional deps.
-if "ebooklib" not in sys.modules:
-    ebooklib_stub = ModuleType("ebooklib")
-    ebooklib_stub.ITEM_DOCUMENT = 9
-    ebooklib_stub.ITEM_COVER = 10
-    ebooklib_stub.ITEM_IMAGE = 11
-    epub_stub = ModuleType("ebooklib.epub")
-    epub_stub.read_epub = lambda *_args, **_kwargs: None
-    ebooklib_stub.epub = epub_stub
-    sys.modules["ebooklib"] = ebooklib_stub
-    sys.modules["ebooklib.epub"] = epub_stub
-
-if "bs4" not in sys.modules:
-    bs4_stub = ModuleType("bs4")
-    bs4_stub.BeautifulSoup = object
-    sys.modules["bs4"] = bs4_stub
-
+# Lightweight stub so pipeline can be imported without the network client dependency.
 if "websocket" not in sys.modules:
     websocket_stub = ModuleType("websocket")
     websocket_stub.WebSocketTimeoutException = TimeoutError
