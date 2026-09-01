@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import sys
 import warnings
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, call, patch
+
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -143,7 +146,7 @@ def test_audioseal_02_calls_do_not_pass_ignored_sample_rate():
     soundfile_module = ModuleType("soundfile")
     soundfile_module.write = Mock(side_effect=lambda output, *_args, **_kwargs: output.write(b"encoded-wav"))
 
-    message = object()
+    message = _FakeTensor("message")
     watermark = _FakeTensor("watermark")
     generator = SimpleNamespace(get_watermark=Mock(return_value=watermark))
     detector = SimpleNamespace(detect_watermark=Mock(return_value=(1.0, object())))
@@ -168,3 +171,140 @@ def test_audioseal_02_calls_do_not_pass_ignored_sample_rate():
     assert result == b"encoded-wav"
     generator.get_watermark.assert_called_once_with(source_tensor, message=message)
     detector.detect_watermark.assert_called_once_with(verification_tensor)
+
+
+@pytest.mark.parametrize(
+    ("requested", "available", "expected"),
+    (("auto", True, "cuda"), ("auto", False, "cpu"), ("cpu", True, "cpu"), ("CPU", False, "cpu")),
+)
+def test_resolve_audioseal_device(requested, available, expected, monkeypatch):
+    fake_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: available))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert audio_watermark.resolve_audioseal_device(requested) == expected
+
+
+def test_explicit_cuda_requires_available_pytorch_device(monkeypatch):
+    fake_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    with pytest.raises(RuntimeError, match="CUDA/ROCm"):
+        audio_watermark.resolve_audioseal_device("cuda")
+
+
+def test_invalid_audioseal_device_is_rejected(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)))
+
+    with pytest.raises(ValueError, match="auto, cpu, cuda"):
+        audio_watermark.resolve_audioseal_device("xpu")
+
+
+def test_audioseal_model_device_failure_is_not_ignored(monkeypatch):
+    class FailingModel:
+        def to(self, device):
+            raise RuntimeError(f"cannot use {device}")
+
+        def eval(self):
+            raise AssertionError("eval must not follow a failed device transfer")
+
+    class FakeAudioSeal:
+        @staticmethod
+        def load_generator(_name):
+            return FailingModel()
+
+        @staticmethod
+        def load_detector(_name):
+            return FailingModel()
+
+    fake_audioseal = ModuleType("audioseal")
+    fake_audioseal.AudioSeal = FakeAudioSeal
+    monkeypatch.setitem(sys.modules, "audioseal", fake_audioseal)
+    audio_watermark._load_audioseal_models.cache_clear()
+
+    with pytest.raises(RuntimeError, match="cannot use cuda"):
+        audio_watermark._load_audioseal_models("cuda")
+
+    audio_watermark._load_audioseal_models.cache_clear()
+
+
+def test_watermark_api_never_falls_back_to_an_unidentified_payload():
+    calls = []
+
+    class IncompatibleGenerator:
+        def get_watermark(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            raise TypeError("unsupported signature")
+
+    message = object()
+    with pytest.raises(audio_watermark.AudioSealCompatibilityError, match="required 0.2 message API"):
+        audio_watermark._watermark_with_message(IncompatibleGenerator(), object(), message)
+
+    assert len(calls) == 1
+    assert calls[0][1]["message"] is message
+
+
+def test_auto_device_retries_cpu_after_cuda_runtime_failure(monkeypatch, caplog):
+    monkeypatch.delenv("AUTOAUDIO_WATERMARK_DEVICE", raising=False)
+    caplog.set_level(logging.WARNING)
+
+    with patch("provenance.audio_watermark.resolve_audioseal_device", return_value="cuda"), patch(
+        "provenance.audio_watermark.watermark_audio_bytes",
+        side_effect=[RuntimeError("GPU allocation failed"), b"cpu-watermarked"],
+    ) as watermark:
+        result, audio = audio_watermark.watermark_audio_bytes_best_effort(
+            b"source", content_id="segment", device="auto"
+        )
+
+    assert result.applied is True
+    assert result.verified is True
+    assert result.detail == "verified; requested=auto; device=cpu; fallback_from=cuda"
+    assert audio == b"cpu-watermarked"
+    assert [entry.kwargs["device"] for entry in watermark.call_args_list] == ["cuda", "cpu"]
+    assert "retrying on CPU" in caplog.text
+
+
+def test_explicit_cuda_failure_does_not_fall_back(monkeypatch):
+    monkeypatch.delenv("AUTOAUDIO_WATERMARK_DEVICE", raising=False)
+
+    with patch("provenance.audio_watermark.resolve_audioseal_device", return_value="cuda"), patch(
+        "provenance.audio_watermark.watermark_audio_bytes", side_effect=RuntimeError("GPU failure")
+    ) as watermark:
+        result, audio = audio_watermark.watermark_audio_bytes_best_effort(
+            b"source", content_id="segment", device="cuda"
+        )
+
+    assert result.applied is False
+    assert audio == b"source"
+    assert watermark.call_count == 1
+
+
+def test_environment_device_override_takes_precedence(monkeypatch):
+    monkeypatch.setenv("AUTOAUDIO_WATERMARK_DEVICE", "cpu")
+
+    with patch("provenance.audio_watermark.resolve_audioseal_device", return_value="cpu") as resolve, patch(
+        "provenance.audio_watermark.watermark_audio_bytes", return_value=b"marked"
+    ) as watermark:
+        result, audio = audio_watermark.watermark_audio_bytes_best_effort(
+            b"source", content_id="segment", device="auto"
+        )
+
+    assert result.applied is True
+    assert audio == b"marked"
+    assert resolve.call_args == call("cpu")
+    assert watermark.call_args.kwargs["device"] == "cpu"
+
+
+def test_message_api_incompatibility_does_not_trigger_device_fallback(monkeypatch):
+    monkeypatch.delenv("AUTOAUDIO_WATERMARK_DEVICE", raising=False)
+
+    with patch("provenance.audio_watermark.resolve_audioseal_device", return_value="cuda"), patch(
+        "provenance.audio_watermark.watermark_audio_bytes",
+        side_effect=audio_watermark.AudioSealCompatibilityError("message API missing"),
+    ) as watermark:
+        result, audio = audio_watermark.watermark_audio_bytes_best_effort(
+            b"source", content_id="segment", device="auto"
+        )
+
+    assert result.applied is False
+    assert audio == b"source"
+    assert watermark.call_count == 1

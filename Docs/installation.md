@@ -64,7 +64,7 @@ python auto_audiobook.py \
 
 - **Cannot connect to ComfyUI:** confirm the server address and that the Qwen nodes loaded without errors.
 - **Missing audio output:** verify the selected model exists and matches the narrator mode.
-- **Watermarking failure:** confirm the installed PyTorch and AudioSeal stack works on the selected platform. AutoAudio rejects unverified segment output.
+- **Watermarking failure:** confirm the installed PyTorch and AudioSeal stack works on the selected platform. Start with `--watermark-device auto`; use `cpu` to diagnose accelerator problems or `cuda` to require NVIDIA CUDA/AMD ROCm. AutoAudio rejects unverified segment output.
 - **GUI unavailable:** install PySide6 in the active Python environment.
 - **Metadata lookup fails:** online Gutenberg metadata is optional; omit `--fetch-metadata` to remain offline.
 

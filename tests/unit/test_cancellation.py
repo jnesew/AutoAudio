@@ -145,6 +145,7 @@ def test_cancelled_pipeline_writes_resumable_checkpoint_without_secret(tmp_path)
     assert "provenance_key_password" not in checkpoint["ui_state"]
     assert checkpoint["ui_state"]["model_choice"] == "1.7B"
     assert checkpoint["ui_state"]["output_format"] == "flac"
+    assert checkpoint["ui_state"]["watermark_device"] == "auto"
 
 
 def test_shared_app_config_preserves_cli_provenance_controls(tmp_path):

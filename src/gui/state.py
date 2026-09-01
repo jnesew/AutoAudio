@@ -37,6 +37,7 @@ GUI_CONTROLLED_DESTINATIONS = frozenset(
         "attention",
         "unload_model_after_generate",
         "output_format",
+        "watermark_device",
         "fetch_metadata",
         "gutenberg_id",
         "title",

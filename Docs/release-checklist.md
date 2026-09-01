@@ -6,7 +6,7 @@ This document tracks evidence required before `release/v2.0.0` can merge into `m
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Unit and spoof/integration suite | Passed | 119 tests after C2PA compatibility and AudioSeal 0.2 cleanup |
+| Unit and spoof/integration suite | Passed | 131 tests after AudioSeal 0.2 cleanup, device selection, and strict message-payload enforcement |
 | Import and compile checks | Passed | Python 3.12 release workspace |
 | Workflow fixtures | Passed | CustomVoice and VoiceDesign adapters covered |
 | Synthetic EPUB fixtures | Passed | pubparser adapter tests |
@@ -24,15 +24,15 @@ This document tracks evidence required before `release/v2.0.0` can merge into `m
 | Real preset generation | Passed | Maintainer manual test |
 | Real VoiceDesign generation | Passed | Maintainer manual test |
 | Chapter stitching | Passed | Maintainer manual test |
-| Stitched-part cover art | Retest needed | Maintainer caught missing artwork; FFmpeg option-order regression fixed and covered across FLAC, MP3, and M4B |
+| Stitched-part cover art | Passed | Maintainer re-stitched a part after the FFmpeg option-order fix and confirmed its cover |
 | FLAC output | Passed | Maintainer manual test |
 | MP3 output | Passed | Maintainer manual test |
 | M4B output | Passed | Maintainer manual test |
 | Interruption and resume | Passed | Maintainer manual test |
 | Disclosure placement | Passed | Maintainer manual test |
-| AudioSeal embedding/detection | Passed indirectly | Strict assembly completed from verified segments; run retained-output verifier for final audit |
-| Complete-book run | In progress | Maintainer processing run |
-| C2PA signing and verification | In progress | Live test credentials pass across FLAC, MP3, and M4B; maintainer certificate and end-to-end pipeline test remain |
+| AudioSeal embedding/detection | Retest planned | Maintainer confirmed embedding/detection on the previous candidate; repeat after the new automatic device policy |
+| Complete-book run | Passed | Maintainer completed the full processing and verification flow |
+| C2PA signing and verification | Retest planned | Live and maintainer tests passed on the previous candidate; repeat provenance verification on the final candidate |
 
 ## Release actions
 
