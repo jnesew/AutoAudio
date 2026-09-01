@@ -411,7 +411,7 @@ def ensure_disclosure_asset(
         precision="bf16",
         language="English",
         seed=268583702137267,
-        max_new_tokens=256,
+        max_new_tokens=2048,
         top_p=0.8,
         top_k=20,
         temperature=1.0,
