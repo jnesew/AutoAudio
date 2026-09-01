@@ -38,8 +38,10 @@ Planned stages:
    - Stream normalized FLAC masters through ffmpeg instead of buffering full raw chapters or parts in Python.
    - Encode MP3/M4B outputs once, build parts from lossless masters, and clean intermediate audio/manifest pairs.
 8. `feature/v2-gui-cli`
-   - Replace the reference-voice picker with narrator-profile controls.
-   - Add effective cooperative cancellation and complete CLI parity.
+   - Replace the reference-voice picker with narrator-profile controls across Book, Narrator, Output/Runtime, and Provenance tabs.
+   - Keep a tested GUI control contract in parity with every applicable CLI option; use one shared runtime configuration builder.
+   - Add thread-safe cooperative cancellation for GUI and `SIGINT`, interrupt the active ComfyUI prompt, and make canceled checkpoints resumable.
+   - Never persist provenance private-key passwords in checkpoint UI state.
 9. `fix/v2-metadata-packaging`
    - Correct provenance model identity, final artifact hashes, filename safety, dependency notices, and documentation.
 10. `release/v2.0.0`

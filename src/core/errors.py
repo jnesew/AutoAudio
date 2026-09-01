@@ -76,6 +76,14 @@ class PipelineRuntimeError(AutoAudioError):
     )
 
 
+class PipelineCancelled(AutoAudioError):
+    guidance = ErrorGuidance(
+        code="PIPELINE_CANCELLED",
+        remediation="Resume the checkpointed run when ready.",
+        exit_code=130,
+    )
+
+
 def format_user_error(exc: BaseException) -> str:
     if isinstance(exc, AutoAudioError):
         return f"[{exc.guidance.code}] {exc}\\nRemediation: {exc.remediation}"

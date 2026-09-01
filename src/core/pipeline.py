@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import re
+import signal
 import subprocess
 import traceback
 from pathlib import Path
@@ -36,6 +37,7 @@ from core.checkpoint import (
     stable_settings_hash,
     validate_artifact,
 )
+from core.cancellation import CancellationToken
 from core.config import AppConfig, GenerationSettings
 from core.errors import (
     AudioStitchError,
@@ -44,6 +46,7 @@ from core.errors import (
     InputValidationError,
     MetadataExtractionError,
     PipelineRuntimeError,
+    PipelineCancelled,
     ResumeStateError,
 )
 from core.logging_utils import configure_run_logger
@@ -211,6 +214,7 @@ def process_segment(
     settings: GenerationSettings,
     config: AppConfig,
     comfyui_client: ComfyUIClient,
+    cancellation: CancellationToken | None = None,
 ) -> tuple[bytes | None, str | None]:
     try:
         artifact = comfyui_client.generate_audio(
@@ -218,6 +222,7 @@ def process_segment(
             text_segment=text_segment,
             settings=settings,
             timeout_seconds=config.comfyui_timeout_seconds,
+            cancellation=cancellation,
         )
         return artifact.content, artifact.extension
     except ClientComfyUIConnectionError as exc:
@@ -283,7 +288,10 @@ def ensure_disclosure_asset(
     checkpoint: dict,
     checkpoint_store: CheckpointStore,
     logger: logging.Logger,
+    cancellation: CancellationToken | None = None,
 ) -> str:
+    if cancellation:
+        cancellation.raise_if_cancelled()
     state_dir.mkdir(parents=True, exist_ok=True)
     disclosure = checkpoint.setdefault("artifacts", {}).setdefault("disclosure", {})
     manifest_path = disclosure.get("manifest_path", "")
@@ -319,6 +327,7 @@ def ensure_disclosure_asset(
         settings=settings,
         config=config,
         comfyui_client=comfyui_client,
+        cancellation=cancellation,
     )
     if not audio_data or len(audio_data) <= 16:
         raise ComfyUIProtocolError("Chapter disclosure generation returned an invalid audio payload.")
@@ -611,7 +620,11 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     return parser
 
 
-def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
+def run_pipeline(
+    args: argparse.Namespace,
+    config: AppConfig,
+    cancellation: CancellationToken | None = None,
+) -> None:
     input_book = os.path.abspath(args.input_book)
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -755,7 +768,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
     can_resume = (
         checkpoint
-        and checkpoint.get("status") in {"running", "failed"}
+        and checkpoint.get("status") in {"running", "failed", "cancelled"}
         and checkpoint.get("input", {}).get("sha256") == input_hash
         and checkpoint.get("compatibility", {}).get("settings_sha256") == settings_hash
         and checkpoint.get("compatibility", {}).get("workflow_sha256") == workflow_hash
@@ -806,6 +819,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
     if book_plan is not None:
         print(f"[Resume] Loaded checkpoint at {checkpoint_store.path}")
+        checkpoint["status"] = "running"
         checkpoint.setdefault("progress", {}).setdefault("completed_chapters", [])
         checkpoint["progress"].setdefault("completed_segments", {})
         checkpoint.setdefault("artifacts", {}).setdefault("segments", {})
@@ -817,6 +831,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint["artifacts"].setdefault("parts", {})
         checkpoint["artifacts"].setdefault("provenance", {})
         checkpoint.setdefault("errors", [])
+        checkpoint_store.save(checkpoint)
     else:
         if source_mode == "epub":
             assert parsed_epub is not None
@@ -854,17 +869,45 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 "input_book": args.input_book,
                 "output_dir": args.output_dir,
                 "source_mode": args.source_mode,
+                "pages_per_chapter": args.pages_per_chapter,
+                "target_words_per_chapter": args.target_words_per_chapter,
+                "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
+                "chapters_per_part": args.chapters_per_part,
+                "target_words_per_segment": segment_policy.target_words,
+                "max_words_per_segment": segment_policy.max_words,
                 "narrator_profile": narrator_profile.id,
                 "speaker": settings.speaker,
                 "voice_instruct": settings.instruct,
+                "model_choice": settings.model_choice,
+                "device": settings.device,
+                "precision": settings.precision,
                 "language": settings.language,
                 "seed": settings.seed,
+                "max_new_tokens": settings.max_new_tokens,
+                "top_p": settings.top_p,
+                "top_k": settings.top_k,
+                "temperature": settings.temperature,
+                "repetition_penalty": settings.repetition_penalty,
+                "attention": settings.attention,
+                "unload_model_after_generate": settings.unload_model_after_generate,
+                "output_format": args.output_format,
                 "disclosure_gap_ms": disclosure_gap_ms,
                 "segment_gap_ms": segment_gap_ms,
                 "chapter_gap_ms": chapter_gap_ms,
                 "fetch_metadata": args.fetch_metadata,
+                "gutenberg_id": args.gutenberg_id,
                 "title": args.title,
                 "author": args.author,
+                "comfyui_mode": args.comfyui_mode,
+                "comfyui_server_address": args.comfyui_server_address,
+                "comfyui_timeout_seconds": args.comfyui_timeout_seconds,
+                "comfyui_spoof_scenario": args.comfyui_spoof_scenario,
+                "provenance_enabled": args.provenance_enabled,
+                "provenance_cert_path": args.provenance_cert_path,
+                "provenance_key_path": args.provenance_key_path,
+                "provenance_failure_mode": args.provenance_failure_mode,
+                "provenance_tool": args.provenance_tool,
+                "provenance_claim_generator": args.provenance_claim_generator,
                 "resume_mode": args.resume,
             },
         )
@@ -882,6 +925,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     cleanup_orphan_manifests(segment_cache_dir)
 
     try:
+        if cancellation:
+            cancellation.raise_if_cancelled()
         disclosure_file = ensure_disclosure_asset(
             state_dir=state_dir,
             workflow_template=disclosure_workflow_template,
@@ -890,6 +935,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             checkpoint=checkpoint,
             checkpoint_store=checkpoint_store,
             logger=logger,
+            cancellation=cancellation,
         )
         disclosure_gap_file = ensure_silence_asset(
             state_dir=state_dir,
@@ -926,6 +972,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             completed_part_chapters.update(stored_chapter_indexes)
 
         for chapter in book_plan.chapters:
+            if cancellation:
+                cancellation.raise_if_cancelled()
             ch_idx = chapter.index
             title = chapter.title
             chapter_key = str(ch_idx)
@@ -963,6 +1011,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                         config=config,
                         provenance_runtime_metadata=provenance_runtime_metadata,
                         logger=logger,
+                        cancellation=cancellation,
                     )
                 _cleanup_chapter_segment_artifacts(
                     chapter_index=ch_idx,
@@ -986,6 +1035,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                         config,
                         provenance_runtime_metadata,
                         logger,
+                        cancellation,
                     )
                     part_index += 1
                     part_chapter_files = []
@@ -1001,6 +1051,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             segment_files: list[str] = []
 
             for segment in chunks:
+                if cancellation:
+                    cancellation.raise_if_cancelled()
                 seg_idx = segment.index
                 chunk = segment.text
                 if not chunk.strip():
@@ -1020,7 +1072,10 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                     settings=settings,
                     config=config,
                     comfyui_client=comfyui_client,
+                    cancellation=cancellation,
                 )
+                if cancellation:
+                    cancellation.raise_if_cancelled()
 
                 if audio_data and len(audio_data) > 16:
                     temp_filename = str(segment_cache_dir / f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}.flac")
@@ -1064,6 +1119,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             chapter_inputs.extend(interleave_audio_files(segment_files, segment_gap_file))
 
             print(f"   -> Assembling lossless chapter master for {chapter_filename}...")
+            if cancellation:
+                cancellation.raise_if_cancelled()
             assemble_lossless_master(
                 chapter_inputs,
                 chapter_master,
@@ -1078,6 +1135,8 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             )
             checkpoint_store.save(checkpoint)
 
+            if cancellation:
+                cancellation.raise_if_cancelled()
             _publish_chapter_from_master(
                 master_path=chapter_master,
                 chapter_filename=chapter_filename,
@@ -1089,6 +1148,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 config=config,
                 provenance_runtime_metadata=provenance_runtime_metadata,
                 logger=logger,
+                cancellation=cancellation,
             )
             part_chapter_files.append((str(chapter_master), title, ch_idx))
 
@@ -1116,6 +1176,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                     config,
                     provenance_runtime_metadata,
                     logger,
+                    cancellation,
                 )
                 part_index += 1
                 part_chapter_files = []
@@ -1135,9 +1196,15 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 config,
                 provenance_runtime_metadata,
                 logger,
+                cancellation,
             )
         checkpoint["status"] = "completed"
         checkpoint_store.save(checkpoint)
+    except PipelineCancelled:
+        checkpoint["status"] = "cancelled"
+        checkpoint_store.save(checkpoint)
+        logger.info("Pipeline canceled by user; resumable state was saved")
+        raise
     except Exception as exc:
         checkpoint["status"] = "failed"
         checkpoint.setdefault("errors", []).append({"message": str(exc), "traceback": traceback.format_exc()})
@@ -1174,6 +1241,7 @@ def _publish_chapter_from_master(
     config: AppConfig,
     provenance_runtime_metadata: ProvenanceRuntimeMetadata,
     logger: logging.Logger,
+    cancellation: CancellationToken | None = None,
 ) -> None:
     chapter_meta = {
         "title": title,
@@ -1181,6 +1249,8 @@ def _publish_chapter_from_master(
         "album": metadata.title,
         "track": str(chapter_index + 1),
     }
+    if cancellation:
+        cancellation.raise_if_cancelled()
     encode_lossless_master(
         master_path,
         chapter_filename,
@@ -1188,6 +1258,8 @@ def _publish_chapter_from_master(
         cover_image=metadata.cover_image_path,
         logger=logger,
     )
+    if cancellation:
+        cancellation.raise_if_cancelled()
     provenance = apply_c2pa_with_policy(
         artifact_path=chapter_filename,
         config=config.provenance,
@@ -1225,6 +1297,7 @@ def stitch_part(
     config: AppConfig,
     provenance_runtime_metadata: ProvenanceRuntimeMetadata,
     logger: logging.Logger,
+    cancellation: CancellationToken | None = None,
 ) -> None:
     part_filename = os.path.join(output_dir, f"{metadata.title} - Part_{part_index:03d}.{output_format}")
     part_master = master_dir / f"part_{part_index:03d}.flac"
@@ -1244,6 +1317,8 @@ def stitch_part(
     )
 
     print(f"   -> Stitching {len(part_chapter_files)} chapters into {part_filename}...")
+    if cancellation:
+        cancellation.raise_if_cancelled()
     assemble_lossless_master(
         files_to_stitch,
         part_master,
@@ -1257,6 +1332,8 @@ def stitch_part(
     )
     checkpoint_store.save(checkpoint)
 
+    if cancellation:
+        cancellation.raise_if_cancelled()
     encode_lossless_master(
         part_master,
         part_filename,
@@ -1265,6 +1342,8 @@ def stitch_part(
         cover_image=metadata.cover_image_path,
         logger=logger,
     )
+    if cancellation:
+        cancellation.raise_if_cancelled()
     provenance = apply_c2pa_with_policy(
         artifact_path=part_filename,
         config=config.provenance,
@@ -1294,16 +1373,7 @@ def stitch_part(
     print(f"   -> Part {part_index:03d} complete.")
 
 
-def main(argv: list[str] | None = None) -> None:
-    project_root = Path(__file__).resolve().parents[2]
-    parser = build_argument_parser(project_root)
-    args = parser.parse_args(argv)
-
-    if args.gui:
-        from gui.app import launch_gui
-
-        raise SystemExit(launch_gui(project_root))
-
+def build_app_config(args: argparse.Namespace, project_root: Path) -> AppConfig:
     kwargs = {
         "project_root": project_root,
         "comfyui_mode": args.comfyui_mode,
@@ -1313,7 +1383,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.comfyui_timeout_seconds is not None:
         kwargs["comfyui_timeout_seconds"] = args.comfyui_timeout_seconds
 
-    config = AppConfig(
+    return AppConfig(
         **kwargs,
         provenance=ProvenanceConfig(
             enabled=args.provenance_enabled,
@@ -1325,9 +1395,44 @@ def main(argv: list[str] | None = None) -> None:
             claim_generator=args.provenance_claim_generator,
         ),
     )
+
+
+def main(argv: list[str] | None = None) -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    parser = build_argument_parser(project_root)
+    args = parser.parse_args(argv)
+
+    if args.gui:
+        from gui.app import launch_gui
+
+        raise SystemExit(launch_gui(project_root))
+
+    config = build_app_config(args, project_root)
+    cancellation = CancellationToken()
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
+
+    def _request_cli_cancellation(_signum, _frame) -> None:
+        if not cancellation.is_cancelled:
+            print("\nCancellation requested; finishing the current safe operation...")
+        cancellation.cancel()
+
+    signal.signal(signal.SIGINT, _request_cli_cancellation)
     try:
-        run_pipeline(args, config)
-    except (InputValidationError, MetadataExtractionError, ResumeStateError, AudioStitchError, ComfyUIConnectionError, ComfyUIProtocolError, PipelineRuntimeError) as exc:
+        run_pipeline(args, config, cancellation=cancellation)
+    except PipelineCancelled as exc:
+        print(f"CANCELED: {exc}")
+        raise SystemExit(exc.guidance.exit_code)
+    except (
+        InputValidationError,
+        MetadataExtractionError,
+        ResumeStateError,
+        AudioStitchError,
+        ComfyUIConnectionError,
+        ComfyUIProtocolError,
+        PipelineRuntimeError,
+    ) as exc:
         print(f"ERROR: [{exc.guidance.code}] {exc}")
         print(f"REMEDIATION: {exc.remediation}")
         raise SystemExit(exc.guidance.exit_code)
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint_handler)
