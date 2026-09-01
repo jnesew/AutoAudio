@@ -331,7 +331,7 @@ def launch_gui(project_root: Path) -> int:
             self.provenance_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.provenance_failure_combo = combo(("soft-fail", "hard-fail"), "soft-fail")
             self.provenance_tool_edit = QLineEdit("c2patool")
-            self.provenance_claim_edit = QLineEdit("autoaudio")
+            self.provenance_claim_edit = QLineEdit(self.default_args.provenance_claim_generator)
             warning = QLabel("Private-key passwords are used for the current run only and are never written to checkpoints.")
             warning.setWordWrap(True)
             form.addRow(self.provenance_enabled_checkbox)

@@ -21,6 +21,7 @@ from core.errors import AudioStitchError
 from provenance.ai_marking import (
     cleanup_orphan_manifests,
     manifest_path_for,
+    refresh_ai_marking_manifest_hash,
     validate_watermarked_artifact,
     write_ai_marking_manifest,
 )
@@ -235,3 +236,18 @@ def test_orphan_marking_manifests_are_removed_without_touching_live_artifacts(tm
     assert not orphan.exists()
     assert live.exists()
     assert manifest_path_for(live).exists()
+
+
+def test_marking_manifest_hash_can_be_refreshed_after_final_container_mutation(tmp_path):
+    artifact = _make_marked_tone(tmp_path / "signed-later.flac")
+    artifact.write_bytes(artifact.read_bytes() + b"c2pa-container-mutation")
+
+    with pytest.raises(ValueError, match="hash does not match"):
+        validate_watermarked_artifact(artifact)
+
+    refresh_ai_marking_manifest_hash(artifact)
+
+    evidence = validate_watermarked_artifact(artifact)
+    payload = json.loads(manifest_path_for(artifact).read_text(encoding="utf-8"))
+    assert evidence.sha256 == payload["artifact_sha256"]
+    assert payload["artifact_hash_scope"] == "entire-artifact-bytes"

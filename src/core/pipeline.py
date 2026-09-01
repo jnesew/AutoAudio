@@ -18,7 +18,7 @@ from comfyui.client import (
 )
 from comfyui.real_client import RealComfyUIClient
 from comfyui.spoof_client import SpoofComfyUIClient
-from comfyui.workflow_loader import load_workflow_template
+from comfyui.workflow_loader import find_qwen_generation_node, load_workflow_template
 from core.audio_assembly import (
     AUDIO_ASSEMBLY_POLICY_VERSION,
     ASSEMBLY_CHANNELS,
@@ -49,11 +49,13 @@ from core.errors import (
     PipelineCancelled,
     ResumeStateError,
 )
+from core.filenames import safe_filename_component
 from core.logging_utils import configure_run_logger
 from core.metadata_adapters import adapter_for_extension
 from core.narrator import NarratorCatalog, NarratorProfileError
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
 from core.segmentation import SegmentPolicy, default_segment_policy, segment_text_for_qwen
+from core.version import default_claim_generator, runtime_autoaudio_version
 from metadata.epub_parser import (
     EPUB_PARSER_POLICY_VERSION,
     EpubParseError,
@@ -67,15 +69,21 @@ from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
 from provenance.ai_marking import (
+    AI_MARKING_SCHEMA,
     ai_marking_metadata_args,
     cleanup_orphan_manifests,
     manifest_path_for,
     remove_artifact_and_manifest,
+    refresh_ai_marking_manifest_hash,
     validate_watermarked_artifact,
     write_ai_marking_manifest,
 )
 from provenance.audio_watermark import watermark_audio_bytes_best_effort
-from provenance.c2pa import ProvenanceConfig, ProvenanceRuntimeMetadata, apply_c2pa_with_policy, parse_model_identity_version
+from provenance.c2pa import (
+    ProvenanceConfig,
+    ProvenanceRuntimeMetadata,
+    apply_c2pa_with_policy,
+)
 
 
 CHAPTER_DISCLOSURE_TEXT = "This audio was generated synthetically with AutoAudio."
@@ -436,49 +444,29 @@ def build_comfyui_client(config: AppConfig) -> ComfyUIClient:
     return RealComfyUIClient(server_address=config.comfyui_server_address)
 
 
-def _extract_provenance_runtime_metadata(workflow_template: dict) -> ProvenanceRuntimeMetadata:
-    backend_name = "unknown-backend"
-    backend_version = "unknown"
-    model_identity = ""
-    model_version = ""
-
-    for node in workflow_template.values():
-        if not isinstance(node, dict):
-            continue
-        class_type = node.get("class_type")
-        inputs = node.get("inputs", {})
-        if class_type in {"FB_Qwen3TTSCustomVoice", "FB_Qwen3TTSVoiceDesign"}:
-            backend_name = str(class_type)
-        if isinstance(inputs, dict) and not model_identity:
-            model_value = inputs.get("model_choice") or inputs.get("model")
-            if isinstance(model_value, str) and model_value.strip():
-                if class_type in {"FB_Qwen3TTSCustomVoice", "FB_Qwen3TTSVoiceDesign"}:
-                    model_identity = "Qwen3-TTS"
-                    model_version = model_value.strip()
-                else:
-                    model_identity, model_version = parse_model_identity_version(model_value.strip())
-        meta = node.get("_meta", {})
-        title = meta.get("title") if isinstance(meta, dict) else None
-        if (
-            class_type in {"FB_Qwen3TTSCustomVoice", "FB_Qwen3TTSVoiceDesign"}
-            and isinstance(title, str)
-            and title.strip()
-        ):
-            backend_version = title.strip()
-
-    software_version = os.environ.get("AUTOAUDIO_VERSION", "dev")
-    return ProvenanceRuntimeMetadata(
-        model_name=model_identity or "unknown-model",
-        model_version=model_version or "unknown",
-        backend_name=backend_name,
-        backend_version=backend_version,
-        software_name="AutoAudio",
-        software_version=software_version,
+def _extract_provenance_runtime_metadata(
+    workflow_template: dict,
+    settings: GenerationSettings,
+) -> ProvenanceRuntimeMetadata:
+    node_id, _voice_mode = find_qwen_generation_node(workflow_template)
+    node = workflow_template[node_id]
+    class_type = str(node.get("class_type") or "unknown-backend")
+    meta = node.get("_meta", {})
+    reported_backend_version = meta.get("version") if isinstance(meta, dict) else None
+    backend_version = (
+        str(reported_backend_version).strip()
+        if reported_backend_version is not None and str(reported_backend_version).strip()
+        else "unreported"
     )
 
-
-def safe_name(text: str) -> str:
-    return "".join(c for c in text if c.isalpha() or c.isdigit() or c in (" ", "_", "-")).rstrip()
+    return ProvenanceRuntimeMetadata(
+        model_name="Qwen3-TTS",
+        model_version=settings.model_choice.strip(),
+        backend_name=class_type,
+        backend_version=backend_version,
+        software_name="AutoAudio",
+        software_version=runtime_autoaudio_version(),
+    )
 
 
 def extract_cover_art(epub_path: str, output_dir: str):
@@ -610,13 +598,23 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         help="When hard-fail, provenance errors stop the pipeline; soft-fail logs warning and continues.",
     )
     parser.add_argument("--provenance-tool", default="c2patool", help="CLI tool used for C2PA embedding/signing.")
-    parser.add_argument("--provenance-claim-generator", default="autoaudio", help="claim_generator value used in C2PA.")
+    parser.add_argument(
+        "--provenance-claim-generator",
+        default=default_claim_generator(),
+        help="claim_generator value used in C2PA.",
+    )
     parser.add_argument(
         "--comfyui-spoof-scenario",
         choices=["success", "timeout", "malformed_history", "missing_view_payload", "connection_error"],
         default="success",
     )
     parser.add_argument("--gui", action="store_true", help="Launch the PySide6 desktop GUI.")
+    parser.add_argument(
+        "--version",
+        dest="version",
+        action="version",
+        version=f"%(prog)s {runtime_autoaudio_version()}",
+    )
     return parser
 
 
@@ -704,7 +702,7 @@ def run_pipeline(
             "disclosure_workflow_sha256": disclosure_workflow_hash,
         }
     )
-    provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template)
+    provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template, settings)
     comfyui_client = build_comfyui_client(config)
     checkpoint_store = CheckpointStore(state_dir=state_dir)
     plan_store = BookPlanStore(state_dir=state_dir)
@@ -739,6 +737,7 @@ def run_pipeline(
             "chapter_disclosure_policy": CHAPTER_DISCLOSURE_POLICY_VERSION,
             "chapter_disclosure_text": CHAPTER_DISCLOSURE_TEXT,
             "audio_assembly_policy": AUDIO_ASSEMBLY_POLICY_VERSION,
+            "ai_marking_schema": AI_MARKING_SCHEMA,
             "disclosure_gap_ms": disclosure_gap_ms,
             "segment_gap_ms": segment_gap_ms,
             "chapter_gap_ms": chapter_gap_ms,
@@ -998,7 +997,7 @@ def run_pipeline(
                     print("   -> Resume encode: rebuilding chapter output from its lossless master.")
                     chapter_filename = os.path.join(
                         output_dir,
-                        f"Chapter_{ch_idx + 1:03d}_{safe_name(title) or f'Chapter_{ch_idx + 1:03d}'}.{args.output_format}",
+                        f"Chapter_{ch_idx + 1:03d}_{safe_filename_component(title, fallback=f'Chapter {ch_idx + 1:03d}')}.{args.output_format}",
                     )
                     _publish_chapter_from_master(
                         master_path=master_artifact["path"],
@@ -1080,7 +1079,7 @@ def run_pipeline(
                 if audio_data and len(audio_data) > 16:
                     temp_filename = str(segment_cache_dir / f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}.flac")
 
-                    segment_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
+                    segment_title = safe_filename_component(title, fallback=f"Chapter {ch_idx + 1:03d}")
                     segment_content_id = f"{segment_title}_seg_{seg_idx + 1:03d}"
 
                     write_watermarked_audio_artifact(
@@ -1109,7 +1108,7 @@ def run_pipeline(
                 print("   -> Chapter failed (no audio generated).")
                 continue
 
-            safe_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
+            safe_title = safe_filename_component(title, fallback=f"Chapter {ch_idx + 1:03d}")
             chapter_filename = os.path.join(output_dir, f"Chapter_{ch_idx + 1:03d}_{safe_title}.{args.output_format}")
             chapter_master = master_dir / f"chapter_{ch_idx + 1:03d}.flac"
 
@@ -1266,16 +1265,22 @@ def _publish_chapter_from_master(
         runtime_metadata=provenance_runtime_metadata,
         logger=logger,
     )
-    checkpoint["artifacts"]["chapters"][str(chapter_index)] = {
-        "path": chapter_filename,
-        "sha256": sha256_file(chapter_filename),
-        "title": title,
-        "master_path": str(master_path),
-    }
+    if provenance:
+        if provenance.final_sha256 != sha256_file(chapter_filename):
+            raise PipelineRuntimeError(f"C2PA final artifact hash mismatch for {chapter_filename}.")
+        refresh_ai_marking_manifest_hash(chapter_filename)
+    chapter_record = _marked_artifact_record(
+        chapter_filename,
+        title=title,
+        master_path=str(master_path),
+    )
+    checkpoint["artifacts"]["chapters"][str(chapter_index)] = chapter_record
     if provenance:
         checkpoint["artifacts"]["provenance"][chapter_filename] = {
             "manifest_id": provenance.manifest_id,
             "embedding_path": provenance.embedding_path,
+            "source_sha256": provenance.source_sha256,
+            "final_sha256": provenance.final_sha256,
         }
         logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", chapter_filename, provenance.manifest_id)
     if chapter_index not in checkpoint["progress"]["completed_chapters"]:
@@ -1299,7 +1304,8 @@ def stitch_part(
     logger: logging.Logger,
     cancellation: CancellationToken | None = None,
 ) -> None:
-    part_filename = os.path.join(output_dir, f"{metadata.title} - Part_{part_index:03d}.{output_format}")
+    safe_book_title = safe_filename_component(metadata.title, fallback="Untitled")
+    part_filename = os.path.join(output_dir, f"{safe_book_title} - Part_{part_index:03d}.{output_format}")
     part_master = master_dir / f"part_{part_index:03d}.flac"
     part_meta = {
         "title": f"{metadata.title} - Part {part_index}",
@@ -1322,7 +1328,7 @@ def stitch_part(
     assemble_lossless_master(
         files_to_stitch,
         part_master,
-        content_id=f"{safe_name(metadata.title)}_part_{part_index:03d}_master",
+        content_id=f"{safe_book_title}_part_{part_index:03d}_master",
         watermarked_source_files=chapter_master_files,
         logger=logger,
     )
@@ -1350,16 +1356,22 @@ def stitch_part(
         runtime_metadata=provenance_runtime_metadata,
         logger=logger,
     )
-    checkpoint["artifacts"]["parts"][str(part_index)] = {
-        "path": part_filename,
-        "sha256": sha256_file(part_filename),
-        "title": f"{metadata.title} - Part {part_index}",
-        "chapter_indexes": chapter_indexes,
-    }
+    if provenance:
+        if provenance.final_sha256 != sha256_file(part_filename):
+            raise PipelineRuntimeError(f"C2PA final artifact hash mismatch for {part_filename}.")
+        refresh_ai_marking_manifest_hash(part_filename)
+    part_record = _marked_artifact_record(
+        part_filename,
+        title=f"{metadata.title} - Part {part_index}",
+        chapter_indexes=chapter_indexes,
+    )
+    checkpoint["artifacts"]["parts"][str(part_index)] = part_record
     if provenance:
         checkpoint["artifacts"]["provenance"][part_filename] = {
             "manifest_id": provenance.manifest_id,
             "embedding_path": provenance.embedding_path,
+            "source_sha256": provenance.source_sha256,
+            "final_sha256": provenance.final_sha256,
         }
         logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", part_filename, provenance.manifest_id)
     checkpoint_store.save(checkpoint)

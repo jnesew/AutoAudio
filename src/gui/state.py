@@ -6,7 +6,7 @@ from typing import Any
 from core.checkpoint import CheckpointError, CheckpointStore
 
 
-GUI_CLI_EXCLUDED_DESTINATIONS = frozenset({"help", "gui", "resume"})
+GUI_CLI_EXCLUDED_DESTINATIONS = frozenset({"help", "gui", "resume", "version"})
 GUI_CONTROLLED_DESTINATIONS = frozenset(
     {
         "input_book",

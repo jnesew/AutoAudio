@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +11,7 @@ from typing import Iterable
 from core.checkpoint import sha256_file
 
 
-AI_MARKING_SCHEMA = "autoaudio.ai_marking.v1"
+AI_MARKING_SCHEMA = "autoaudio.ai_marking.v2"
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,26 @@ def manifest_path_for(artifact_path: str | Path) -> Path:
     return artifact.with_suffix(f"{artifact.suffix}.ai.json")
 
 
+def _write_manifest_payload(manifest_path: Path, payload: dict) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_path = tempfile.mkstemp(
+        prefix=f".{manifest_path.name}.",
+        suffix=".tmp",
+        dir=manifest_path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        os.replace(temp_path, manifest_path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
 def write_ai_marking_manifest(
     artifact_path: str | Path,
     *,
@@ -50,10 +72,12 @@ def write_ai_marking_manifest(
     source_artifacts: Iterable[WatermarkEvidence] = (),
 ) -> Path:
     artifact = Path(artifact_path)
+    generated_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "schema": AI_MARKING_SCHEMA,
         "artifact": artifact.name,
         "artifact_sha256": sha256_file(artifact) if artifact.exists() else "",
+        "artifact_hash_scope": "entire-artifact-bytes",
         "ai_generated": True,
         "ai_system": "AutoAudio",
         "provider": "ComfyUI",
@@ -75,10 +99,31 @@ def write_ai_marking_manifest(
             }
             for item in source_artifacts
         ],
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "generated_at_utc": generated_at,
+        "artifact_hash_updated_at_utc": generated_at,
     }
     manifest_path = manifest_path_for(artifact)
-    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_manifest_payload(manifest_path, payload)
+    return manifest_path
+
+
+def refresh_ai_marking_manifest_hash(artifact_path: str | Path) -> Path:
+    """Refresh sidecar integrity after a final in-place container mutation."""
+    artifact = Path(artifact_path)
+    if not artifact.is_file():
+        raise ValueError(f"Cannot refresh watermark manifest for missing artifact: {artifact}")
+    manifest_path = manifest_path_for(artifact)
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot refresh unreadable watermark manifest {manifest_path}: {exc}") from exc
+    if payload.get("schema") != AI_MARKING_SCHEMA or payload.get("artifact") != artifact.name:
+        raise ValueError(f"Cannot refresh incompatible watermark manifest: {manifest_path}")
+
+    payload["artifact_sha256"] = sha256_file(artifact)
+    payload["artifact_hash_scope"] = "entire-artifact-bytes"
+    payload["artifact_hash_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    _write_manifest_payload(manifest_path, payload)
     return manifest_path
 
 
@@ -98,6 +143,10 @@ def validate_watermarked_artifact(artifact_path: str | Path) -> WatermarkEvidenc
 
     if payload.get("schema") != AI_MARKING_SCHEMA:
         raise ValueError(f"Unsupported watermark manifest schema: {payload.get('schema')!r}")
+    if payload.get("artifact") != artifact.name:
+        raise ValueError(f"Watermark manifest artifact name does not match {artifact}")
+    if payload.get("artifact_hash_scope") != "entire-artifact-bytes":
+        raise ValueError(f"Watermark manifest has unsupported artifact hash scope: {manifest_path}")
 
     actual_sha256 = sha256_file(artifact)
     if payload.get("artifact_sha256") != actual_sha256:
