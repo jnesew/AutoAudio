@@ -36,6 +36,8 @@ The manifest records:
 
 The C2PA tool creates the container-specific hard binding. After embedding, AutoAudio rehashes the complete final container and refreshes its AI-marking sidecar and checkpoint records.
 
+AutoAudio validates the newly signed container before replacing the unsigned artifact. Temporary signing files are created beside the output so replacement remains atomic even when the system temporary directory is on another filesystem. Current `c2patool` releases require an M4A filename while initially signing an M4B container; AutoAudio uses an internal M4A alias and restores the requested M4B filename without changing the signed bytes.
+
 Use `--provenance-failure-mode hard-fail` when unsigned output must never be accepted. Certificate and private-key paths can be checkpointed as configuration; private-key passwords are never persisted.
 
 ## BookPlan and checkpoint contract
