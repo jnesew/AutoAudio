@@ -80,7 +80,7 @@ def test_parse_epub_builds_autoaudio_snapshot_and_normalizes_gutenberg(tmp_path)
 
     parsed = parse_epub(source)
 
-    assert EPUB_PARSER_POLICY_VERSION == "pubparser-v0.1.0-gutenberg-v1"
+    assert EPUB_PARSER_POLICY_VERSION == "pubparser-v0.1.1-gutenberg-v1"
     assert parsed.metadata.title == "Fixture Book"
     assert parsed.metadata.author == "Example Author"
     assert parsed.metadata.language == "en"

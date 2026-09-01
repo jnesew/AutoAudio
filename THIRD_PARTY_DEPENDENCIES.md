@@ -7,7 +7,7 @@ Third-party dependencies are licensed under their own terms.
 
 | Package | Requirement | License / notice scope | Notes |
 |---|---|---|---|
-| pubparser | exact commit `6a03fa2` (`v0.1.0`; metadata `0.1.0.dev0`) | MIT | EPUB parsing, metadata, cover discovery, and Project Gutenberg normalization. |
+| pubparser | exact commit `60bfedf` (`v0.1.1`) | MIT | EPUB parsing, metadata, cover discovery, Project Gutenberg normalization, and canonical XHTML public-doctype handling. |
 | websocket-client | `>=1.8` | Apache-2.0 | WebSocket client for ComfyUI events. |
 | PySide6 | `>=6.7` | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only OR Commercial | Includes Qt/Shiboken components. Binary redistribution must preserve the license files shipped by the selected wheels and satisfy the chosen Qt licensing route. |
 | numpy | unpinned | BSD-3-Clause plus bundled component notices | Numeric processing used by audio watermarking. The selected wheel can contain separately licensed numeric libraries. |

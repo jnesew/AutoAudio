@@ -10,7 +10,7 @@ from pubparser import ParsingMode, normalize_project_gutenberg, open_epub
 from metadata.models import BookMetadata, ChapterMetadata
 
 
-EPUB_PARSER_POLICY_VERSION = "pubparser-v0.1.0-gutenberg-v1"
+EPUB_PARSER_POLICY_VERSION = "pubparser-v0.1.1-gutenberg-v1"
 _COVER_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
