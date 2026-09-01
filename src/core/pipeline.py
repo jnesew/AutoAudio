@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import logging
 import os
 import re
 import subprocess
 import traceback
-from datetime import datetime, timezone
 from pathlib import Path
 
 from comfyui.client import (
@@ -20,6 +18,16 @@ from comfyui.client import (
 from comfyui.real_client import RealComfyUIClient
 from comfyui.spoof_client import SpoofComfyUIClient
 from comfyui.workflow_loader import load_workflow_template
+from core.audio_assembly import (
+    AUDIO_ASSEMBLY_POLICY_VERSION,
+    ASSEMBLY_CHANNELS,
+    ASSEMBLY_SAMPLE_RATE,
+    assemble_lossless_master,
+    chapter_markers_for_files,
+    encode_lossless_master,
+    ensure_silence_file,
+    interleave_audio_files,
+)
 from core.checkpoint import (
     CheckpointError,
     CheckpointStore,
@@ -39,7 +47,7 @@ from core.errors import (
     ResumeStateError,
 )
 from core.logging_utils import configure_run_logger
-from core.metadata_adapters import MetadataContext, adapter_for_extension
+from core.metadata_adapters import adapter_for_extension
 from core.narrator import NarratorCatalog, NarratorProfileError
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
 from core.segmentation import SegmentPolicy, default_segment_policy, segment_text_for_qwen
@@ -55,92 +63,23 @@ from metadata.source_mode import detect_source_mode
 from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
+from provenance.ai_marking import (
+    ai_marking_metadata_args,
+    cleanup_orphan_manifests,
+    manifest_path_for,
+    remove_artifact_and_manifest,
+    validate_watermarked_artifact,
+    write_ai_marking_manifest,
+)
 from provenance.audio_watermark import watermark_audio_bytes_best_effort
 from provenance.c2pa import ProvenanceConfig, ProvenanceRuntimeMetadata, apply_c2pa_with_policy, parse_model_identity_version
 
 
 CHAPTER_DISCLOSURE_TEXT = "This audio was generated synthetically with AutoAudio."
 CHAPTER_DISCLOSURE_POLICY_VERSION = "chapter-disclosure-v1"
-
-
-def _sanitize_ffmpeg_metadata_value(value: str | None) -> str | None:
-    if not value:
-        return None
-    sanitized = re.sub(r"[\r\n]+", " ", value).strip()
-    return sanitized or None
-
-
-def _ai_marking_metadata_args() -> list[str]:
-    return [
-        "-metadata",
-        "ai_generated=true",
-        "-metadata",
-        "ai_system=AutoAudio",
-        "-metadata",
-        "ai_provider=ComfyUI",
-        "-metadata",
-        "ai_marking=audio_watermark+metadata+manifest",
-    ]
-
-
-def _write_ai_marking_manifest(
-    artifact_path: str,
-    *,
-    content_id: str,
-    metadata_embedded: bool,
-    watermark_applied: bool,
-    watermark_verified: bool,
-    watermark_detail: str,
-) -> None:
-    artifact = Path(artifact_path)
-    payload = {
-        "schema": "autoaudio.ai_marking.v1",
-        "artifact": artifact.name,
-        "artifact_sha256": sha256_file(str(artifact)) if artifact.exists() else "",
-        "ai_generated": True,
-        "ai_system": "AutoAudio",
-        "provider": "ComfyUI",
-        "content_id": content_id,
-        "marking_methods": {
-            "metadata": metadata_embedded,
-            "audio_watermark": {
-                "applied": watermark_applied,
-                "verified": watermark_verified,
-                "detail": watermark_detail,
-            },
-        },
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-    }
-    manifest_path = artifact.with_suffix(f"{artifact.suffix}.ai.json")
-    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _is_valid_cover_image(cover_image: str) -> bool:
-    if not os.path.exists(cover_image):
-        return False
-    try:
-        subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                cover_image,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-        )
-        return True
-    except Exception:
-        logging.getLogger("autoaudio.run").warning("Invalid cover image detected; skipping attached cover: %s", cover_image)
-        return False
+DEFAULT_DISCLOSURE_GAP_MS = 700
+DEFAULT_SEGMENT_GAP_MS = 150
+DEFAULT_CHAPTER_GAP_MS = 1000
 
 
 def extract_text_blocks_from_epub(epub_path: str) -> list[tuple[str, str]]:
@@ -265,30 +204,6 @@ def build_qwen_book_plan(
     )
 
 
-def get_audio_duration_ms(file_path: str) -> int:
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                file_path,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-        )
-        return int(float(result.stdout.strip()) * 1000)
-    except Exception as exc:
-        logging.getLogger("autoaudio.run").warning("Could not get duration for %s (%s)", file_path, exc)
-        return 0
-
-
 def process_segment(
     *,
     text_segment: str,
@@ -334,8 +249,9 @@ def write_watermarked_audio_artifact(
 
     adapter = adapter_for_extension(output_path)
     command = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
-    command.extend(_ai_marking_metadata_args())
+    command.extend(ai_marking_metadata_args())
     command.extend(adapter.ffmpeg_output_args())
+    command.extend(["-ar", str(ASSEMBLY_SAMPLE_RATE), "-ac", str(ASSEMBLY_CHANNELS)])
     command.append(output_path)
     try:
         subprocess.run(
@@ -348,7 +264,7 @@ def write_watermarked_audio_artifact(
     except subprocess.CalledProcessError as exc:
         raise PipelineRuntimeError(f"Error encoding watermarked audio artifact {output_path}: {exc}") from exc
 
-    _write_ai_marking_manifest(
+    write_ai_marking_manifest(
         output_path,
         content_id=content_id,
         metadata_embedded=True,
@@ -374,7 +290,11 @@ def ensure_disclosure_asset(
     if validate_artifact(disclosure.get("path", ""), disclosure.get("sha256")) and validate_artifact(
         manifest_path, disclosure.get("manifest_sha256")
     ):
-        return str(disclosure["path"])
+        try:
+            validate_watermarked_artifact(disclosure["path"])
+            return str(disclosure["path"])
+        except ValueError:
+            remove_artifact_and_manifest(disclosure.get("path", ""))
 
     settings = GenerationSettings(
         voice_mode="preset",
@@ -411,7 +331,7 @@ def ensure_disclosure_asset(
         content_id=content_id,
         logger=logger,
     )
-    sidecar_path = output_path.with_suffix(f"{output_path.suffix}.ai.json")
+    sidecar_path = manifest_path_for(output_path)
     checkpoint["artifacts"]["disclosure"] = {
         "path": str(output_path),
         "sha256": sha256_file(output_path),
@@ -422,6 +342,83 @@ def ensure_disclosure_asset(
     }
     checkpoint_store.save(checkpoint)
     return str(output_path)
+
+
+def ensure_silence_asset(
+    *,
+    state_dir: Path,
+    kind: str,
+    duration_ms: int,
+    checkpoint: dict,
+    checkpoint_store: CheckpointStore,
+) -> str | None:
+    """Create one deterministic, lossless silence asset per configured gap."""
+    if duration_ms == 0:
+        return None
+
+    silence_artifacts = checkpoint.setdefault("artifacts", {}).setdefault("silence", {})
+    record = silence_artifacts.get(kind, {})
+    if record.get("duration_ms") == duration_ms and validate_artifact(
+        record.get("path", ""), record.get("sha256")
+    ):
+        return str(record["path"])
+
+    output_path = state_dir / "silence" / f"{kind}_{duration_ms}ms.flac"
+    ensure_silence_file(output_path, duration_ms)
+    silence_artifacts[kind] = {
+        "path": str(output_path),
+        "sha256": sha256_file(output_path),
+        "duration_ms": duration_ms,
+    }
+    checkpoint_store.save(checkpoint)
+    return str(output_path)
+
+
+def _marked_checkpoint_artifact_is_valid(record: dict | None) -> bool:
+    if not record:
+        return False
+    path = record.get("path", "")
+    manifest_path = record.get("manifest_path", str(manifest_path_for(path)) if path else "")
+    if not validate_artifact(path, record.get("sha256")) or not validate_artifact(
+        manifest_path, record.get("manifest_sha256")
+    ):
+        return False
+    try:
+        validate_watermarked_artifact(path)
+        return True
+    except ValueError:
+        return False
+
+
+def _marked_artifact_record(path: str | Path, **extra) -> dict:
+    artifact = Path(path)
+    manifest = manifest_path_for(artifact)
+    return {
+        "path": str(artifact),
+        "sha256": sha256_file(artifact),
+        "manifest_path": str(manifest),
+        "manifest_sha256": sha256_file(manifest),
+        **extra,
+    }
+
+
+def _cleanup_chapter_segment_artifacts(
+    *,
+    chapter_index: int,
+    checkpoint: dict,
+    checkpoint_store: CheckpointStore,
+    segment_cache_dir: Path,
+) -> None:
+    chapter_prefix = f"{chapter_index}:"
+    segment_artifacts = checkpoint["artifacts"]["segments"]
+    for segment_key, record in list(segment_artifacts.items()):
+        if record.get("chapter_index") != chapter_index and not segment_key.startswith(chapter_prefix):
+            continue
+        remove_artifact_and_manifest(record.get("path", ""))
+        segment_artifacts.pop(segment_key, None)
+    checkpoint["progress"]["completed_segments"].pop(str(chapter_index), None)
+    checkpoint_store.save(checkpoint)
+    cleanup_orphan_manifests(segment_cache_dir)
 
 
 def build_comfyui_client(config: AppConfig) -> ComfyUIClient:
@@ -469,117 +466,6 @@ def _extract_provenance_runtime_metadata(workflow_template: dict) -> ProvenanceR
         software_name="AutoAudio",
         software_version=software_version,
     )
-
-
-def combine_audio_files(audio_files, output_filename, metadata=None, chapter_titles=None, cover_image=None):
-    valid_files = [path for path in audio_files if os.path.exists(path)]
-    if not valid_files:
-        return False
-
-    adapter = adapter_for_extension(output_filename)
-    context = MetadataContext(
-        title=_sanitize_ffmpeg_metadata_value((metadata or {}).get("title")),
-        artist=_sanitize_ffmpeg_metadata_value((metadata or {}).get("artist")),
-        album=_sanitize_ffmpeg_metadata_value((metadata or {}).get("album")),
-        track=_sanitize_ffmpeg_metadata_value((metadata or {}).get("track")),
-        disc=_sanitize_ffmpeg_metadata_value((metadata or {}).get("disc")),
-    )
-
-    list_file = output_filename + ".concat.txt"
-    meta_file = output_filename + ".ffmeta"
-
-    try:
-        with open(list_file, "w", encoding="utf-8") as file:
-            for path in valid_files:
-                escaped_path = path.replace("'", "'\\''")
-                file.write(f"file '{escaped_path}'\n")
-
-        extract_cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c:a", "pcm_s16le", "-f", "wav", "pipe:1"]
-        extract_proc = subprocess.run(extract_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        concat_bytes = extract_proc.stdout
-
-        content_id = (metadata or {}).get("title") or Path(output_filename).name
-        watermark_result, marked_audio_data = watermark_audio_bytes_best_effort(
-            concat_bytes,
-            content_id=content_id,
-            logger=logging.getLogger("autoaudio.run"),
-        )
-        if not watermark_result.applied or not watermark_result.verified:
-            raise RuntimeError(f"AI marking failed strict checks: applied={watermark_result.applied}, verified={watermark_result.verified}")
-
-        cmd = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
-        input_idx = 1
-
-        if chapter_titles and len(chapter_titles) == len(valid_files):
-            with open(meta_file, "w", encoding="utf-8") as file:
-                file.write(";FFMETADATA1\n")
-                if metadata:
-                    for key, value in metadata.items():
-                        sanitized_value = _sanitize_ffmpeg_metadata_value(value)
-                        if sanitized_value:
-                            file.write(f"{key}={sanitized_value}\n")
-
-                current_ms = 0
-                for i, path in enumerate(valid_files):
-                    duration_ms = get_audio_duration_ms(path)
-                    end_ms = current_ms + duration_ms
-                    chapter_title = _sanitize_ffmpeg_metadata_value(chapter_titles[i]) or f"Chapter {i + 1}"
-                    file.write(f"\n[CHAPTER]\nTIMEBASE=1/1000\nSTART={current_ms}\nEND={end_ms}\ntitle={chapter_title}\n")
-                    current_ms = end_ms
-
-            cmd.extend(["-i", meta_file, "-map_metadata", str(input_idx)])
-            input_idx += 1
-
-        cmd.extend(adapter.ffmpeg_metadata_args(context))
-        cmd.extend(_ai_marking_metadata_args())
-
-        include_cover = bool(cover_image and _is_valid_cover_image(cover_image))
-        if include_cover:
-            cmd.extend(["-i", cover_image])
-            cmd.extend(["-map", "0:a", "-map", f"{input_idx}:v"])
-            cmd.extend(["-disposition:v", "attached_pic"])
-
-        cmd.extend(adapter.ffmpeg_output_args())
-        cmd.append(output_filename)
-
-        try:
-            subprocess.run(cmd, input=marked_audio_data, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            if include_cover:
-                logging.getLogger("autoaudio.run").warning(
-                    "Stitching failed with attached cover; retrying without cover art for %s", output_filename
-                )
-                cmd_no_cover = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
-                input_idx_no_cover = 1
-                if chapter_titles and len(chapter_titles) == len(valid_files):
-                    cmd_no_cover.extend(["-i", meta_file, "-map_metadata", str(input_idx_no_cover)])
-                cmd_no_cover.extend(adapter.ffmpeg_metadata_args(context))
-                cmd_no_cover.extend(_ai_marking_metadata_args())
-                cmd_no_cover.extend(adapter.ffmpeg_output_args())
-                cmd_no_cover.append(output_filename)
-                subprocess.run(cmd_no_cover, input=marked_audio_data, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                raise
-
-        _write_ai_marking_manifest(
-            output_filename,
-            content_id=content_id,
-            metadata_embedded=True,
-            watermark_applied=watermark_result.applied,
-            watermark_verified=watermark_result.verified,
-            watermark_detail=watermark_result.detail,
-        )
-        return True
-    except Exception as exc:
-        raise AudioStitchError(f"Error during stitching: {exc}") from exc
-    finally:
-        try:
-            if os.path.exists(list_file):
-                os.remove(list_file)
-            if os.path.exists(meta_file):
-                os.remove(meta_file)
-        except Exception:
-            pass
 
 
 def safe_name(text: str) -> str:
@@ -658,6 +544,24 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--chapters-per-part", type=int, default=5)
     parser.add_argument("--target-words-per-segment", type=int, default=None)
     parser.add_argument("--max-words-per-segment", type=int, default=None)
+    parser.add_argument(
+        "--disclosure-gap-ms",
+        type=int,
+        default=DEFAULT_DISCLOSURE_GAP_MS,
+        help="Lossless silence inserted after the chapter disclosure (0 disables).",
+    )
+    parser.add_argument(
+        "--segment-gap-ms",
+        type=int,
+        default=DEFAULT_SEGMENT_GAP_MS,
+        help="Lossless silence inserted between narration segments (0 disables).",
+    )
+    parser.add_argument(
+        "--chapter-gap-ms",
+        type=int,
+        default=DEFAULT_CHAPTER_GAP_MS,
+        help="Lossless silence inserted between chapters in part files (0 disables).",
+    )
     parser.add_argument("--narrator-profile", default="preset-eric-neutral")
     parser.add_argument("--speaker", default=None, help="Override the selected preset profile's Qwen speaker.")
     parser.add_argument("--voice-instruct", default=None, help="Override the selected profile's voice/style instruction.")
@@ -715,6 +619,21 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     os.makedirs(state_dir, exist_ok=True)
     logger, run_log_path = configure_run_logger(output_dir)
     logger.info("Pipeline started for input=%s output=%s", input_book, output_dir)
+
+    gap_settings = {
+        "disclosure_gap_ms": getattr(args, "disclosure_gap_ms", DEFAULT_DISCLOSURE_GAP_MS),
+        "segment_gap_ms": getattr(args, "segment_gap_ms", DEFAULT_SEGMENT_GAP_MS),
+        "chapter_gap_ms": getattr(args, "chapter_gap_ms", DEFAULT_CHAPTER_GAP_MS),
+    }
+    invalid_gap = next(
+        (name for name, duration_ms in gap_settings.items() if duration_ms < 0 or duration_ms > 60_000),
+        None,
+    )
+    if invalid_gap:
+        raise InputValidationError(f"{invalid_gap.replace('_', '-')} must be between 0 and 60000 milliseconds.")
+    disclosure_gap_ms = gap_settings["disclosure_gap_ms"]
+    segment_gap_ms = gap_settings["segment_gap_ms"]
+    chapter_gap_ms = gap_settings["chapter_gap_ms"]
 
     try:
         source_mode = detect_source_mode(input_book, args.source_mode)
@@ -806,6 +725,10 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             "unload_model_after_generate": settings.unload_model_after_generate,
             "chapter_disclosure_policy": CHAPTER_DISCLOSURE_POLICY_VERSION,
             "chapter_disclosure_text": CHAPTER_DISCLOSURE_TEXT,
+            "audio_assembly_policy": AUDIO_ASSEMBLY_POLICY_VERSION,
+            "disclosure_gap_ms": disclosure_gap_ms,
+            "segment_gap_ms": segment_gap_ms,
+            "chapter_gap_ms": chapter_gap_ms,
             "output_format": args.output_format,
             "fetch_metadata": args.fetch_metadata,
             "gutenberg_id": args.gutenberg_id,
@@ -887,6 +810,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
         checkpoint["progress"].setdefault("completed_segments", {})
         checkpoint.setdefault("artifacts", {}).setdefault("segments", {})
         checkpoint["artifacts"].setdefault("disclosure", {})
+        checkpoint["artifacts"].setdefault("silence", {})
+        checkpoint["artifacts"].setdefault("chapter_masters", {})
+        checkpoint["artifacts"].setdefault("part_masters", {})
         checkpoint["artifacts"].setdefault("chapters", {})
         checkpoint["artifacts"].setdefault("parts", {})
         checkpoint["artifacts"].setdefault("provenance", {})
@@ -933,6 +859,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 "voice_instruct": settings.instruct,
                 "language": settings.language,
                 "seed": settings.seed,
+                "disclosure_gap_ms": disclosure_gap_ms,
+                "segment_gap_ms": segment_gap_ms,
+                "chapter_gap_ms": chapter_gap_ms,
                 "fetch_metadata": args.fetch_metadata,
                 "title": args.title,
                 "author": args.author,
@@ -945,9 +874,12 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     metadata = resolve_metadata(args, input_book, source_mode, output_dir, parsed_epub=parsed_epub)
 
     part_index = 1
-    part_chapter_files: list[tuple[str, str]] = []
-    segment_cache_dir = os.path.join(output_dir, ".segments")
-    os.makedirs(segment_cache_dir, exist_ok=True)
+    part_chapter_files: list[tuple[str, str, int]] = []
+    segment_cache_dir = Path(output_dir) / ".segments"
+    master_dir = state_dir / "masters"
+    segment_cache_dir.mkdir(parents=True, exist_ok=True)
+    master_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_orphan_manifests(segment_cache_dir)
 
     try:
         disclosure_file = ensure_disclosure_asset(
@@ -959,15 +891,104 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
             checkpoint_store=checkpoint_store,
             logger=logger,
         )
+        disclosure_gap_file = ensure_silence_asset(
+            state_dir=state_dir,
+            kind="disclosure_gap",
+            duration_ms=disclosure_gap_ms,
+            checkpoint=checkpoint,
+            checkpoint_store=checkpoint_store,
+        )
+        segment_gap_file = ensure_silence_asset(
+            state_dir=state_dir,
+            kind="segment_gap",
+            duration_ms=segment_gap_ms,
+            checkpoint=checkpoint,
+            checkpoint_store=checkpoint_store,
+        )
+        chapter_gap_file = ensure_silence_asset(
+            state_dir=state_dir,
+            kind="chapter_gap",
+            duration_ms=chapter_gap_ms,
+            checkpoint=checkpoint,
+            checkpoint_store=checkpoint_store,
+        )
+
+        completed_part_chapters: set[int] = set()
+        for stored_part_index, part_artifact in checkpoint["artifacts"]["parts"].items():
+            if not validate_artifact(part_artifact.get("path", ""), part_artifact.get("sha256")):
+                continue
+            try:
+                stored_chapter_indexes = [int(index) for index in part_artifact.get("chapter_indexes", [])]
+                part_index = max(part_index, int(stored_part_index) + 1)
+            except (TypeError, ValueError):
+                logger.warning("Ignoring malformed completed-part checkpoint entry: %s", stored_part_index)
+                continue
+            completed_part_chapters.update(stored_chapter_indexes)
+
         for chapter in book_plan.chapters:
             ch_idx = chapter.index
             title = chapter.title
             chapter_key = str(ch_idx)
             chapter_artifact = checkpoint.get("artifacts", {}).get("chapters", {}).get(chapter_key)
-            if chapter_artifact and validate_artifact(chapter_artifact.get("path", ""), chapter_artifact.get("sha256")):
+            chapter_is_valid = bool(
+                chapter_artifact
+                and validate_artifact(chapter_artifact.get("path", ""), chapter_artifact.get("sha256"))
+            )
+            master_artifact = checkpoint["artifacts"]["chapter_masters"].get(chapter_key)
+            master_is_valid = _marked_checkpoint_artifact_is_valid(master_artifact)
+
+            if ch_idx in completed_part_chapters and chapter_is_valid:
                 print(f"\nProcessing {title}")
-                print("   -> Resume skip: chapter artifact passed integrity checks.")
-                part_chapter_files.append((chapter_artifact["path"], title))
+                print("   -> Resume skip: chapter belongs to an integrity-checked completed part.")
+                continue
+
+            if master_is_valid:
+                print(f"\nProcessing {title}")
+                if chapter_is_valid:
+                    print("   -> Resume skip: chapter and lossless master passed integrity checks.")
+                else:
+                    print("   -> Resume encode: rebuilding chapter output from its lossless master.")
+                    chapter_filename = os.path.join(
+                        output_dir,
+                        f"Chapter_{ch_idx + 1:03d}_{safe_name(title) or f'Chapter_{ch_idx + 1:03d}'}.{args.output_format}",
+                    )
+                    _publish_chapter_from_master(
+                        master_path=master_artifact["path"],
+                        chapter_filename=chapter_filename,
+                        title=title,
+                        chapter_index=ch_idx,
+                        metadata=metadata,
+                        checkpoint=checkpoint,
+                        checkpoint_store=checkpoint_store,
+                        config=config,
+                        provenance_runtime_metadata=provenance_runtime_metadata,
+                        logger=logger,
+                    )
+                _cleanup_chapter_segment_artifacts(
+                    chapter_index=ch_idx,
+                    checkpoint=checkpoint,
+                    checkpoint_store=checkpoint_store,
+                    segment_cache_dir=segment_cache_dir,
+                )
+                part_chapter_files.append((master_artifact["path"], title, ch_idx))
+                if len(part_chapter_files) >= args.chapters_per_part:
+                    stitch_part(
+                        part_chapter_files,
+                        output_dir,
+                        metadata,
+                        part_index,
+                        args.output_format,
+                        chapter_gap_file,
+                        chapter_gap_ms,
+                        master_dir,
+                        checkpoint,
+                        checkpoint_store,
+                        config,
+                        provenance_runtime_metadata,
+                        logger,
+                    )
+                    part_index += 1
+                    part_chapter_files = []
                 continue
 
             print(f"\nProcessing {title}")
@@ -977,8 +998,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
             chunks = chapter.segments
             print(f"   -> Loaded {len(chunks)} planned synthesis segments.")
-            segment_files = []
-            segment_keys_for_chapter: list[str] = []
+            segment_files: list[str] = []
 
             for segment in chunks:
                 seg_idx = segment.index
@@ -988,14 +1008,13 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
                 segment_key = segment.id
                 segment_artifact = checkpoint.get("artifacts", {}).get("segments", {}).get(segment_key)
-                if segment_artifact and validate_artifact(segment_artifact.get("path", ""), segment_artifact.get("sha256")):
+                if _marked_checkpoint_artifact_is_valid(segment_artifact):
                     segment_files.append(segment_artifact["path"])
-                    segment_keys_for_chapter.append(segment_key)
                     print(f"   -> Segment {seg_idx + 1}/{len(chunks)} resume hit [OK]")
                     continue
 
                 print(f"   -> Generating Segment {seg_idx + 1}/{len(chunks)}...", end="\r")
-                audio_data, audio_ext = process_segment(
+                audio_data, _audio_ext = process_segment(
                     text_segment=chunk,
                     workflow_template=workflow_template,
                     settings=settings,
@@ -1004,8 +1023,7 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 )
 
                 if audio_data and len(audio_data) > 16:
-                    ext_to_use = audio_ext if audio_ext in [".wav", ".flac", ".mp3", ".opus"] else ".flac"
-                    temp_filename = os.path.join(segment_cache_dir, f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}{ext_to_use}")
+                    temp_filename = str(segment_cache_dir / f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}.flac")
 
                     segment_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
                     segment_content_id = f"{segment_title}_seg_{seg_idx + 1:03d}"
@@ -1017,10 +1035,10 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                         logger=logger,
                     )
                     segment_files.append(temp_filename)
-                    segment_keys_for_chapter.append(segment_key)
                     checkpoint["artifacts"]["segments"][segment_key] = {
-                        "path": temp_filename,
-                        "sha256": sha256_file(temp_filename),
+                        **_marked_artifact_record(temp_filename),
+                        "chapter_index": ch_idx,
+                        "segment_index": seg_idx,
                     }
                     checkpoint["progress"]["completed_segments"].setdefault(chapter_key, [])
                     if seg_idx not in checkpoint["progress"]["completed_segments"][chapter_key]:
@@ -1038,47 +1056,48 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
 
             safe_title = safe_name(title) or f"Chapter_{ch_idx + 1:03d}"
             chapter_filename = os.path.join(output_dir, f"Chapter_{ch_idx + 1:03d}_{safe_title}.{args.output_format}")
-            chapter_meta = {"title": title, "artist": metadata.author, "album": metadata.title, "track": str(ch_idx + 1)}
+            chapter_master = master_dir / f"chapter_{ch_idx + 1:03d}.flac"
 
-            print(f"   -> Stitching chapter to {chapter_filename}...")
-            if combine_audio_files(
-                [disclosure_file, *segment_files],
-                chapter_filename,
-                metadata=chapter_meta,
-                cover_image=metadata.cover_image_path,
-            ):
-                provenance = apply_c2pa_with_policy(
-                    artifact_path=chapter_filename,
-                    config=config.provenance,
-                    runtime_metadata=provenance_runtime_metadata,
-                    logger=logger,
-                )
-                part_chapter_files.append((chapter_filename, title))
-                checkpoint["artifacts"]["chapters"][chapter_key] = {
-                    "path": chapter_filename,
-                    "sha256": sha256_file(chapter_filename),
-                    "title": title,
-                }
-                if provenance:
-                    checkpoint["artifacts"]["provenance"][chapter_filename] = {
-                        "manifest_id": provenance.manifest_id,
-                        "embedding_path": provenance.embedding_path,
-                    }
-                    logger.info(
-                        "Checkpointed C2PA manifest artifact=%s manifest_id=%s", chapter_filename, provenance.manifest_id
-                    )
-                if ch_idx not in checkpoint["progress"]["completed_chapters"]:
-                    checkpoint["progress"]["completed_chapters"].append(ch_idx)
-                checkpoint_store.save(checkpoint)
+            chapter_inputs = [disclosure_file]
+            if disclosure_gap_file:
+                chapter_inputs.append(disclosure_gap_file)
+            chapter_inputs.extend(interleave_audio_files(segment_files, segment_gap_file))
 
-            for segment_key, filename in zip(segment_keys_for_chapter, segment_files):
-                try:
-                    os.remove(filename)
-                except Exception:
-                    pass
-                checkpoint["artifacts"]["segments"].pop(segment_key, None)
-            checkpoint["progress"]["completed_segments"].pop(chapter_key, None)
+            print(f"   -> Assembling lossless chapter master for {chapter_filename}...")
+            assemble_lossless_master(
+                chapter_inputs,
+                chapter_master,
+                content_id=f"{safe_title}_chapter_master",
+                watermarked_source_files=[disclosure_file, *segment_files],
+                logger=logger,
+            )
+            checkpoint["artifacts"]["chapter_masters"][chapter_key] = _marked_artifact_record(
+                chapter_master,
+                title=title,
+                chapter_index=ch_idx,
+            )
             checkpoint_store.save(checkpoint)
+
+            _publish_chapter_from_master(
+                master_path=chapter_master,
+                chapter_filename=chapter_filename,
+                title=title,
+                chapter_index=ch_idx,
+                metadata=metadata,
+                checkpoint=checkpoint,
+                checkpoint_store=checkpoint_store,
+                config=config,
+                provenance_runtime_metadata=provenance_runtime_metadata,
+                logger=logger,
+            )
+            part_chapter_files.append((str(chapter_master), title, ch_idx))
+
+            _cleanup_chapter_segment_artifacts(
+                chapter_index=ch_idx,
+                checkpoint=checkpoint,
+                checkpoint_store=checkpoint_store,
+                segment_cache_dir=segment_cache_dir,
+            )
 
             print("   -> Chapter complete.")
 
@@ -1089,6 +1108,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                     metadata,
                     part_index,
                     args.output_format,
+                    chapter_gap_file,
+                    chapter_gap_ms,
+                    master_dir,
                     checkpoint,
                     checkpoint_store,
                     config,
@@ -1105,6 +1127,9 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
                 metadata,
                 part_index,
                 args.output_format,
+                chapter_gap_file,
+                chapter_gap_ms,
+                master_dir,
                 checkpoint,
                 checkpoint_store,
                 config,
@@ -1137,19 +1162,72 @@ def run_pipeline(args: argparse.Namespace, config: AppConfig) -> None:
     print("\nDone.")
 
 
-def stitch_part(
-    part_chapter_files,
-    output_dir,
+def _publish_chapter_from_master(
+    *,
+    master_path: str | Path,
+    chapter_filename: str,
+    title: str,
+    chapter_index: int,
     metadata: BookMetadata,
-    part_index: int,
-    output_format: str,
     checkpoint: dict,
     checkpoint_store: CheckpointStore,
     config: AppConfig,
     provenance_runtime_metadata: ProvenanceRuntimeMetadata,
     logger: logging.Logger,
-):
+) -> None:
+    chapter_meta = {
+        "title": title,
+        "artist": metadata.author,
+        "album": metadata.title,
+        "track": str(chapter_index + 1),
+    }
+    encode_lossless_master(
+        master_path,
+        chapter_filename,
+        metadata=chapter_meta,
+        cover_image=metadata.cover_image_path,
+        logger=logger,
+    )
+    provenance = apply_c2pa_with_policy(
+        artifact_path=chapter_filename,
+        config=config.provenance,
+        runtime_metadata=provenance_runtime_metadata,
+        logger=logger,
+    )
+    checkpoint["artifacts"]["chapters"][str(chapter_index)] = {
+        "path": chapter_filename,
+        "sha256": sha256_file(chapter_filename),
+        "title": title,
+        "master_path": str(master_path),
+    }
+    if provenance:
+        checkpoint["artifacts"]["provenance"][chapter_filename] = {
+            "manifest_id": provenance.manifest_id,
+            "embedding_path": provenance.embedding_path,
+        }
+        logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", chapter_filename, provenance.manifest_id)
+    if chapter_index not in checkpoint["progress"]["completed_chapters"]:
+        checkpoint["progress"]["completed_chapters"].append(chapter_index)
+    checkpoint_store.save(checkpoint)
+
+
+def stitch_part(
+    part_chapter_files: list[tuple[str, str, int]],
+    output_dir: str,
+    metadata: BookMetadata,
+    part_index: int,
+    output_format: str,
+    chapter_gap_file: str | None,
+    chapter_gap_ms: int,
+    master_dir: Path,
+    checkpoint: dict,
+    checkpoint_store: CheckpointStore,
+    config: AppConfig,
+    provenance_runtime_metadata: ProvenanceRuntimeMetadata,
+    logger: logging.Logger,
+) -> None:
     part_filename = os.path.join(output_dir, f"{metadata.title} - Part_{part_index:03d}.{output_format}")
+    part_master = master_dir / f"part_{part_index:03d}.flac"
     part_meta = {
         "title": f"{metadata.title} - Part {part_index}",
         "artist": metadata.author,
@@ -1157,36 +1235,63 @@ def stitch_part(
         "disc": str(part_index),
     }
 
-    files_to_stitch = [file_path for file_path, _ in part_chapter_files]
-    titles_to_embed = [title for _, title in part_chapter_files]
+    chapter_master_files = [file_path for file_path, _, _ in part_chapter_files]
+    files_to_stitch = interleave_audio_files(chapter_master_files, chapter_gap_file)
+    chapter_indexes = [chapter_index for _, _, chapter_index in part_chapter_files]
+    chapter_markers = chapter_markers_for_files(
+        [(file_path, title) for file_path, title, _ in part_chapter_files],
+        gap_duration_ms=chapter_gap_ms,
+    )
 
     print(f"   -> Stitching {len(part_chapter_files)} chapters into {part_filename}...")
-    if combine_audio_files(
+    assemble_lossless_master(
         files_to_stitch,
+        part_master,
+        content_id=f"{safe_name(metadata.title)}_part_{part_index:03d}_master",
+        watermarked_source_files=chapter_master_files,
+        logger=logger,
+    )
+    checkpoint["artifacts"]["part_masters"][str(part_index)] = _marked_artifact_record(
+        part_master,
+        chapter_indexes=chapter_indexes,
+    )
+    checkpoint_store.save(checkpoint)
+
+    encode_lossless_master(
+        part_master,
         part_filename,
         metadata=part_meta,
-        chapter_titles=titles_to_embed,
+        chapter_markers=chapter_markers,
         cover_image=metadata.cover_image_path,
-    ):
-        provenance = apply_c2pa_with_policy(
-            artifact_path=part_filename,
-            config=config.provenance,
-            runtime_metadata=provenance_runtime_metadata,
-            logger=logger,
-        )
-        checkpoint["artifacts"]["parts"][str(part_index)] = {
-            "path": part_filename,
-            "sha256": sha256_file(part_filename),
-            "title": f"{metadata.title} - Part {part_index}",
+        logger=logger,
+    )
+    provenance = apply_c2pa_with_policy(
+        artifact_path=part_filename,
+        config=config.provenance,
+        runtime_metadata=provenance_runtime_metadata,
+        logger=logger,
+    )
+    checkpoint["artifacts"]["parts"][str(part_index)] = {
+        "path": part_filename,
+        "sha256": sha256_file(part_filename),
+        "title": f"{metadata.title} - Part {part_index}",
+        "chapter_indexes": chapter_indexes,
+    }
+    if provenance:
+        checkpoint["artifacts"]["provenance"][part_filename] = {
+            "manifest_id": provenance.manifest_id,
+            "embedding_path": provenance.embedding_path,
         }
-        if provenance:
-            checkpoint["artifacts"]["provenance"][part_filename] = {
-                "manifest_id": provenance.manifest_id,
-                "embedding_path": provenance.embedding_path,
-            }
-            logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", part_filename, provenance.manifest_id)
-        checkpoint_store.save(checkpoint)
-        print(f"   -> Part {part_index:03d} complete.")
+        logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", part_filename, provenance.manifest_id)
+    checkpoint_store.save(checkpoint)
+
+    remove_artifact_and_manifest(part_master)
+    checkpoint["artifacts"]["part_masters"].pop(str(part_index), None)
+    for chapter_index, chapter_master in zip(chapter_indexes, chapter_master_files):
+        remove_artifact_and_manifest(chapter_master)
+        checkpoint["artifacts"]["chapter_masters"].pop(str(chapter_index), None)
+    checkpoint_store.save(checkpoint)
+    print(f"   -> Part {part_index:03d} complete.")
 
 
 def main(argv: list[str] | None = None) -> None:

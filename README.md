@@ -34,6 +34,8 @@ AutoAudio v2 has no reference-audio upload or voice-cloning path. Narrators are 
 
 At the start of a job, AutoAudio generates and checkpoints one fixed neutral disclosure asset using the preset Qwen voice. That same watermarked asset is placed exactly once at the beginning of every produced chapter. Narration calls contain only book text, and every generated narration segment receives a verified non-audible AudioSeal watermark before chapter assembly.
 
+Assembly is file-streamed through normalized 24 kHz mono FLAC masters instead of buffering a whole chapter or part as raw audio in Python. Configurable lossless silence assets provide the disclosure, segment, and chapter spacing. MP3 and M4B outputs are encoded exactly once from those masters; part files never use already-lossy chapter outputs as inputs.
+
 > If you do not have a live ComfyUI runtime yet, you can still run pipeline logic with `--comfyui-mode spoof` for testing/development.
 
 ## Quick usage flow
@@ -101,6 +103,9 @@ Notes:
 - `--narrator-profile <id>` selects a profile from the bundled narrator catalog.
 - `--target-words-per-segment <int>` sets the soft semantic segment target.
 - `--max-words-per-segment <int>` sets the strict segment ceiling.
+- `--disclosure-gap-ms <0..60000>` sets silence after the chapter disclosure (default `700`).
+- `--segment-gap-ms <0..60000>` sets silence between narration segments (default `150`).
+- `--chapter-gap-ms <0..60000>` sets silence between chapters in part files (default `1000`).
 - `--speaker <name>` overrides a preset profile speaker.
 - `--voice-instruct <text>` overrides style guidance or the VoiceDesign description.
 - `--model-choice <value>`, `--device <value>`, `--precision <value>`, `--language <value>`
@@ -173,6 +178,8 @@ AutoAudio validates required assertion fields before signing and raises explicit
 - Chapter files: `Chapter_###_<title>.<format>`
 - Part files: `<book title> - Part_###.<format>`
 - Segment cache: `<output-dir>/.segments/`
+- Lossless assembly masters (checkpointed until their part succeeds): `<output-dir>/.autoaudio_state/masters/`
+- Reusable silence assets: `<output-dir>/.autoaudio_state/silence/`
 - Run log: `<output-dir>/autoaudio_debug.log`
 - Resume checkpoint state: `<output-dir>/.autoaudio_state/checkpoint_state.json`
 - Immutable synthesis plan: `<output-dir>/.autoaudio_state/book_plan.json`
@@ -180,11 +187,10 @@ AutoAudio validates required assertion fields before signing and raises explicit
 ### Verify AI marking and watermarking
 
 The system automatically applies a public default fallback secret key (`default_public_autoaudio_key_123`) to guarantee consistent AudioSeal PyTorch watermarking happens.
-After generation, verify that segment and stitched outputs contain AI metadata tags,
-watermark status manifests, and machine-readable marking sidecars:
+During generation, segment sidecars record direct AudioSeal verification. Chapter and part sidecars record hash-checked inheritance from their verified source artifacts. Successfully assembled segment files and sidecars are removed together. Verify retained chapter and part outputs with:
 
 ```bash
-python src/provenance/verify.py --output-dir "<output-dir>" --include-segments
+python src/provenance/verify.py --output-dir "<output-dir>"
 ```
 The command exits with a non-zero status if any artifact is missing `ai_*` tags,
 missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not applied/verified.

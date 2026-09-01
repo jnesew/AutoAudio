@@ -128,7 +128,10 @@ def create_initial_checkpoint(
         },
         "artifacts": {
             "disclosure": {},
+            "silence": {},
             "segments": {},
+            "chapter_masters": {},
+            "part_masters": {},
             "chapters": {},
             "parts": {},
             "provenance": {},
