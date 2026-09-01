@@ -8,6 +8,10 @@ At the beginning of a job, AutoAudio generates and checkpoints one neutral discl
 
 Every generated narration segment is converted to 24 kHz mono audio, marked with AudioSeal, and immediately passed through the AudioSeal detector. Unverified output is rejected before assembly.
 
+Each mark carries a deterministic 16-bit message derived from the segment content ID, its pre-watermark audio SHA-256, and the configured watermark key. AutoAudio requires an AudioSeal API capable of embedding that message; it never falls back to an unidentified watermark. The public default key makes the payload reproducible rather than secret. Deployments may set `AUTOAUDIO_WATERMARK_SECRET` to a stable private value, but changing it does not make an already assembled audiobook retroactively verifiable from its final container alone.
+
+The default `--watermark-device auto` setting prefers CUDA when PyTorch reports it available, including AMD ROCm installations, and retries on CPU if automatic GPU execution fails. Explicit `cpu` and `cuda` selections are strict. `AUTOAUDIO_WATERMARK_DEVICE` provides a process-level override.
+
 Sidecars distinguish two evidence scopes:
 
 - Segment and disclosure sidecars record direct embedding and detector verification.

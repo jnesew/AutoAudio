@@ -41,11 +41,14 @@ EPUB parsing is offline. AutoAudio reads publication spine order, extracts metad
 ## Spacing and output
 
 - `--output-format {flac,mp3,m4b}`
+- `--watermark-device {auto,cpu,cuda}`: AudioSeal device. `auto` prefers a PyTorch CUDA/ROCm device and retries on CPU if automatic GPU execution fails.
 - `--disclosure-gap-ms <0..60000>`: silence following each chapter disclosure.
 - `--segment-gap-ms <0..60000>`: silence between narration segments.
 - `--chapter-gap-ms <0..60000>`: silence between chapters in part files.
 
 AutoAudio builds normalized 24 kHz mono FLAC masters and encodes MP3 or M4B once from those lossless masters.
+
+An explicit `cpu` or `cuda` selection never changes devices silently. On AMD ROCm systems, select `cuda`, which is the device name exposed by PyTorch. The `AUTOAUDIO_WATERMARK_DEVICE` environment variable can override this setting for a process.
 
 ## Metadata
 

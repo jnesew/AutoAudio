@@ -248,12 +248,14 @@ def write_watermarked_audio_artifact(
     audio_data: bytes,
     output_path: str | Path,
     content_id: str,
+    watermark_device: str,
     logger: logging.Logger,
 ) -> None:
     output_path = str(output_path)
     watermark_result, marked_audio_data = watermark_audio_bytes_best_effort(
         audio_data,
         content_id=content_id,
+        device=watermark_device,
         logger=logger,
     )
     if not watermark_result.applied or not watermark_result.verified:
@@ -297,6 +299,7 @@ def ensure_disclosure_asset(
     comfyui_client: ComfyUIClient,
     checkpoint: dict,
     checkpoint_store: CheckpointStore,
+    watermark_device: str,
     logger: logging.Logger,
     cancellation: CancellationToken | None = None,
 ) -> str:
@@ -348,6 +351,7 @@ def ensure_disclosure_asset(
         audio_data=audio_data,
         output_path=output_path,
         content_id=content_id,
+        watermark_device=watermark_device,
         logger=logger,
     )
     sidecar_path = manifest_path_for(output_path)
@@ -631,6 +635,12 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument("--output-format", choices=["flac", "mp3", "m4b"], default="flac")
+    parser.add_argument(
+        "--watermark-device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="AudioSeal runtime device; auto tries CUDA/ROCm and falls back to CPU.",
+    )
     parser.add_argument("--fetch-metadata", action="store_true", help="Optional online metadata lookup (disabled by default).")
     parser.add_argument("--gutenberg-id", default="", help="Optional explicit Gutenberg ID for online metadata fetch.")
     parser.add_argument("--title", default="", help="Override audiobook title (highest metadata priority).")
@@ -795,6 +805,7 @@ def run_pipeline(
             "segment_gap_ms": segment_gap_ms,
             "chapter_gap_ms": chapter_gap_ms,
             "output_format": args.output_format,
+            "watermark_device": args.watermark_device,
             "fetch_metadata": args.fetch_metadata,
             "gutenberg_id": args.gutenberg_id,
             "title": args.title,
@@ -943,6 +954,7 @@ def run_pipeline(
                 "attention": settings.attention,
                 "unload_model_after_generate": settings.unload_model_after_generate,
                 "output_format": args.output_format,
+                "watermark_device": args.watermark_device,
                 "disclosure_gap_ms": disclosure_gap_ms,
                 "segment_gap_ms": segment_gap_ms,
                 "chapter_gap_ms": chapter_gap_ms,
@@ -995,6 +1007,7 @@ def run_pipeline(
             comfyui_client=comfyui_client,
             checkpoint=checkpoint,
             checkpoint_store=checkpoint_store,
+            watermark_device=args.watermark_device,
             logger=logger,
             cancellation=cancellation,
         )
@@ -1173,6 +1186,7 @@ def run_pipeline(
                         audio_data=audio_data,
                         output_path=temp_filename,
                         content_id=segment_content_id,
+                        watermark_device=args.watermark_device,
                         logger=logger,
                     )
                     segment_files.append(temp_filename)

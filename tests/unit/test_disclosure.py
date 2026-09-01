@@ -60,9 +60,12 @@ def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_pat
         "comfyui_client": client,
         "checkpoint": checkpoint,
         "checkpoint_store": store,
+        "watermark_device": "cpu",
         "logger": logging.getLogger("test.disclosure"),
     }
-    with patch("core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking, b"marked")), patch(
+    with patch(
+        "core.pipeline.watermark_audio_bytes_best_effort", return_value=(marking, b"marked")
+    ) as watermark, patch(
         "core.pipeline.subprocess.run", side_effect=fake_encode
     ):
         first = ensure_disclosure_asset(**call_args)
@@ -72,5 +75,6 @@ def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_pat
     assert len(client.calls) == 1
     assert client.calls[0]["text_segment"] == CHAPTER_DISCLOSURE_TEXT
     assert client.calls[0]["settings"].voice_mode == "preset"
+    assert watermark.call_args.kwargs["device"] == "cpu"
     assert checkpoint["artifacts"]["disclosure"]["policy_version"] == "chapter-disclosure-v1"
     assert Path(checkpoint["artifacts"]["disclosure"]["manifest_path"]).exists()

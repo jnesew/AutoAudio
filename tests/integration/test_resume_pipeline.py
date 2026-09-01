@@ -58,6 +58,7 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             attention="sdpa",
             unload_model_after_generate=False,
             output_format="flac",
+            watermark_device="auto",
             fetch_metadata=False,
             gutenberg_id="",
             title="",
