@@ -11,7 +11,8 @@ This document tracks evidence required before `release/v2.0.0` can merge into `m
 | Workflow fixtures | Passed | CustomVoice and VoiceDesign adapters covered |
 | Synthetic EPUB fixtures | Passed | pubparser adapter tests |
 | Real Project Gutenberg EPUB | Passed | pubparser v0.1.1 parsed book 84 with metadata, cover, and normalization |
-| Source-package/install smoke | Pending | Run from the final release commit |
+| Source-archive smoke | Passed on candidate | Commit `0a03036`; archive SHA-256 `ff797e4ff312e71366ce1ac08f7da59d6e57ceb46db5734b59e16b6552c40b08`; 108 tests plus CLI help/version |
+| Clean-environment dependency install | Pending | Run after the final dependency resolution is selected |
 | Exact dependency inventory | Pending | Capture the final tested platform resolution |
 
 ## Manual runtime gates
