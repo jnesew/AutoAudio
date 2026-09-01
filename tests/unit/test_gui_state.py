@@ -102,3 +102,12 @@ def test_gui_uses_dropdowns_for_bundled_speaker_and_model_choices():
     assert "self.model_choice_combo = combo(QWEN_MODEL_CHOICES_BY_MODE" in source
     assert "self.speaker_edit = QLineEdit()" not in source
     assert "self.model_choice_edit = QLineEdit()" not in source
+
+
+def test_gui_connects_structured_progress_and_eta_updates():
+    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+
+    assert "progress_changed = Signal(object)" in source
+    assert "progress_callback=self.progress_changed.emit" in source
+    assert "self.worker.progress_changed.connect(self._on_progress)" in source
+    assert "format_progress_text(update)" in source

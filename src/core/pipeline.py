@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 
 from comfyui.client import (
@@ -54,6 +55,7 @@ from core.logging_utils import configure_run_logger
 from core.metadata_adapters import adapter_for_extension
 from core.narrator import NarratorCatalog, NarratorProfileError
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
+from core.progress import ProgressTracker, ProgressUpdate
 from core.segmentation import SegmentPolicy, default_segment_policy, segment_text_for_qwen
 from core.version import default_claim_generator, runtime_autoaudio_version
 from metadata.epub_parser import (
@@ -419,6 +421,51 @@ def _marked_artifact_record(path: str | Path, **extra) -> dict:
     }
 
 
+def _completed_progress_keys(book_plan: BookPlan, checkpoint: dict) -> set[str]:
+    """Recover only work that the pipeline can actually reuse from this checkpoint."""
+    completed: set[str] = set()
+    artifacts = checkpoint.get("artifacts", {})
+    if _marked_checkpoint_artifact_is_valid(artifacts.get("disclosure")):
+        completed.add(ProgressTracker.disclosure_key())
+
+    completed_part_chapters: set[int] = set()
+    for raw_part_index, record in artifacts.get("parts", {}).items():
+        if not _marked_checkpoint_artifact_is_valid(record):
+            continue
+        try:
+            part_index = int(raw_part_index)
+            chapter_indexes = {int(value) for value in record.get("chapter_indexes", [])}
+        except (TypeError, ValueError):
+            continue
+        completed.add(ProgressTracker.part_key(part_index))
+        completed_part_chapters.update(chapter_indexes)
+
+    chapter_artifacts = artifacts.get("chapters", {})
+    chapter_masters = artifacts.get("chapter_masters", {})
+    segment_artifacts = artifacts.get("segments", {})
+    for chapter in book_plan.chapters:
+        if chapter.skipped_reason:
+            continue
+        chapter_key = str(chapter.index)
+        chapter_is_valid = _marked_checkpoint_artifact_is_valid(chapter_artifacts.get(chapter_key))
+        master_is_valid = _marked_checkpoint_artifact_is_valid(chapter_masters.get(chapter_key))
+        fully_reusable = master_is_valid or (chapter.index in completed_part_chapters and chapter_is_valid)
+
+        if fully_reusable:
+            completed.update(
+                ProgressTracker.segment_key(chapter.index, segment.index)
+                for segment in chapter.segments
+            )
+        else:
+            for segment in chapter.segments:
+                if _marked_checkpoint_artifact_is_valid(segment_artifacts.get(segment.id)):
+                    completed.add(ProgressTracker.segment_key(chapter.index, segment.index))
+
+        if chapter_is_valid and fully_reusable:
+            completed.add(ProgressTracker.chapter_key(chapter.index))
+    return completed
+
+
 def _cleanup_chapter_segment_artifacts(
     *,
     chapter_index: int,
@@ -627,6 +674,7 @@ def run_pipeline(
     args: argparse.Namespace,
     config: AppConfig,
     cancellation: CancellationToken | None = None,
+    progress_callback: Callable[[ProgressUpdate], None] | None = None,
 ) -> None:
     input_book = os.path.abspath(args.input_book)
     output_dir = os.path.abspath(args.output_dir)
@@ -920,6 +968,14 @@ def run_pipeline(
     print(f"--- Processing Book: {input_book} ---")
     metadata = resolve_metadata(args, input_book, source_mode, output_dir, parsed_epub=parsed_epub)
 
+    progress = ProgressTracker(
+        book_plan=book_plan,
+        chapters_per_part=args.chapters_per_part,
+        completed_keys=_completed_progress_keys(book_plan, checkpoint),
+        callback=progress_callback,
+    )
+    progress.report("Preparing")
+
     part_index = 1
     part_chapter_files: list[tuple[str, str, int]] = []
     segment_cache_dir = Path(output_dir) / ".segments"
@@ -931,6 +987,7 @@ def run_pipeline(
     try:
         if cancellation:
             cancellation.raise_if_cancelled()
+        progress.report("Preparing disclosure")
         disclosure_file = ensure_disclosure_asset(
             state_dir=state_dir,
             workflow_template=disclosure_workflow_template,
@@ -941,6 +998,7 @@ def run_pipeline(
             logger=logger,
             cancellation=cancellation,
         )
+        progress.complete(ProgressTracker.disclosure_key(), "Disclosure ready")
         disclosure_gap_file = ensure_silence_asset(
             state_dir=state_dir,
             kind="disclosure_gap",
@@ -981,6 +1039,7 @@ def run_pipeline(
             ch_idx = chapter.index
             title = chapter.title
             chapter_key = str(ch_idx)
+            progress.report("Checking resume state", chapter_index=ch_idx)
             chapter_artifact = checkpoint.get("artifacts", {}).get("chapters", {}).get(chapter_key)
             chapter_is_valid = bool(
                 chapter_artifact
@@ -992,6 +1051,7 @@ def run_pipeline(
             if ch_idx in completed_part_chapters and chapter_is_valid:
                 print(f"\nProcessing {title}")
                 print("   -> Resume skip: chapter belongs to an integrity-checked completed part.")
+                progress.report("Resume skip", chapter_index=ch_idx)
                 continue
 
             if master_is_valid:
@@ -1000,6 +1060,7 @@ def run_pipeline(
                     print("   -> Resume skip: chapter and lossless master passed integrity checks.")
                 else:
                     print("   -> Resume encode: rebuilding chapter output from its lossless master.")
+                    progress.report("Encoding chapter", chapter_index=ch_idx)
                     chapter_filename = os.path.join(
                         output_dir,
                         f"Chapter_{ch_idx + 1:03d}_{safe_filename_component(title, fallback=f'Chapter {ch_idx + 1:03d}')}.{args.output_format}",
@@ -1017,6 +1078,11 @@ def run_pipeline(
                         logger=logger,
                         cancellation=cancellation,
                     )
+                progress.complete(
+                    ProgressTracker.chapter_key(ch_idx),
+                    "Chapter complete",
+                    chapter_index=ch_idx,
+                )
                 _cleanup_chapter_segment_artifacts(
                     chapter_index=ch_idx,
                     checkpoint=checkpoint,
@@ -1025,6 +1091,7 @@ def run_pipeline(
                 )
                 part_chapter_files.append((master_artifact["path"], title, ch_idx))
                 if len(part_chapter_files) >= args.chapters_per_part:
+                    progress.report("Assembling part")
                     stitch_part(
                         part_chapter_files,
                         output_dir,
@@ -1041,6 +1108,7 @@ def run_pipeline(
                         logger,
                         cancellation,
                     )
+                    progress.complete(ProgressTracker.part_key(part_index), "Part complete")
                     part_index += 1
                     part_chapter_files = []
                 continue
@@ -1048,6 +1116,7 @@ def run_pipeline(
             print(f"\nProcessing {title}")
             if chapter.skipped_reason:
                 print(f"   (Skipping {chapter.skipped_reason})")
+                progress.report("Skipped chapter", chapter_index=ch_idx)
                 continue
 
             chunks = chapter.segments
@@ -1062,11 +1131,24 @@ def run_pipeline(
                 if not chunk.strip():
                     continue
 
+                progress.report(
+                    "Narrating",
+                    chapter_index=ch_idx,
+                    segment_index=seg_idx,
+                    total_segments=len(chunks),
+                )
+
                 segment_key = segment.id
                 segment_artifact = checkpoint.get("artifacts", {}).get("segments", {}).get(segment_key)
                 if _marked_checkpoint_artifact_is_valid(segment_artifact):
                     segment_files.append(segment_artifact["path"])
                     print(f"   -> Segment {seg_idx + 1}/{len(chunks)} resume hit [OK]")
+                    progress.report(
+                        "Resume segment",
+                        chapter_index=ch_idx,
+                        segment_index=seg_idx,
+                        total_segments=len(chunks),
+                    )
                     continue
 
                 print(f"   -> Generating Segment {seg_idx + 1}/{len(chunks)}...", end="\r")
@@ -1104,6 +1186,13 @@ def run_pipeline(
                         checkpoint["progress"]["completed_segments"][chapter_key].append(seg_idx)
                     checkpoint_store.save(checkpoint)
                     print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [OK]   ")
+                    progress.complete(
+                        ProgressTracker.segment_key(ch_idx, seg_idx),
+                        "Narrating",
+                        chapter_index=ch_idx,
+                        segment_index=seg_idx,
+                        total_segments=len(chunks),
+                    )
                 else:
                     raise ComfyUIProtocolError(
                         f"Generated Segment {seg_idx + 1}/{len(chunks)} failed: ComfyUI returned invalid audio payload."
@@ -1123,6 +1212,7 @@ def run_pipeline(
             chapter_inputs.extend(interleave_audio_files(segment_files, segment_gap_file))
 
             print(f"   -> Assembling lossless chapter master for {chapter_filename}...")
+            progress.report("Assembling chapter", chapter_index=ch_idx)
             if cancellation:
                 cancellation.raise_if_cancelled()
             assemble_lossless_master(
@@ -1141,6 +1231,7 @@ def run_pipeline(
 
             if cancellation:
                 cancellation.raise_if_cancelled()
+            progress.report("Encoding chapter", chapter_index=ch_idx)
             _publish_chapter_from_master(
                 master_path=chapter_master,
                 chapter_filename=chapter_filename,
@@ -1154,6 +1245,11 @@ def run_pipeline(
                 logger=logger,
                 cancellation=cancellation,
             )
+            progress.complete(
+                ProgressTracker.chapter_key(ch_idx),
+                "Chapter complete",
+                chapter_index=ch_idx,
+            )
             part_chapter_files.append((str(chapter_master), title, ch_idx))
 
             _cleanup_chapter_segment_artifacts(
@@ -1166,6 +1262,7 @@ def run_pipeline(
             print("   -> Chapter complete.")
 
             if len(part_chapter_files) >= args.chapters_per_part:
+                progress.report("Assembling part")
                 stitch_part(
                     part_chapter_files,
                     output_dir,
@@ -1182,10 +1279,12 @@ def run_pipeline(
                     logger,
                     cancellation,
                 )
+                progress.complete(ProgressTracker.part_key(part_index), "Part complete")
                 part_index += 1
                 part_chapter_files = []
 
         if part_chapter_files:
+            progress.report("Assembling part")
             stitch_part(
                 part_chapter_files,
                 output_dir,
@@ -1202,17 +1301,21 @@ def run_pipeline(
                 logger,
                 cancellation,
             )
+            progress.complete(ProgressTracker.part_key(part_index), "Part complete")
         checkpoint["status"] = "completed"
         checkpoint_store.save(checkpoint)
+        progress.finish()
     except PipelineCancelled:
         checkpoint["status"] = "cancelled"
         checkpoint_store.save(checkpoint)
+        progress.report("Canceled")
         logger.info("Pipeline canceled by user; resumable state was saved")
         raise
     except Exception as exc:
         checkpoint["status"] = "failed"
         checkpoint.setdefault("errors", []).append({"message": str(exc), "traceback": traceback.format_exc()})
         checkpoint_store.save(checkpoint)
+        progress.report("Failed")
         logger.exception("Pipeline failed")
         if isinstance(
             exc,

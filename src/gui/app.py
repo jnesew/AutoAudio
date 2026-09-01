@@ -19,6 +19,7 @@ from core.pipeline import (
     resolve_metadata,
     run_pipeline,
 )
+from core.progress import ProgressUpdate, format_progress_text
 from gui.state import bool_from_ui_state, load_resume_context
 
 
@@ -115,6 +116,7 @@ def launch_gui(project_root: Path) -> int:
     class PipelineWorker(QObject):
         finished = Signal(str, str)
         log_line = Signal(str)
+        progress_changed = Signal(object)
 
         def __init__(self, args: argparse.Namespace, config: AppConfig):
             super().__init__()
@@ -129,7 +131,12 @@ def launch_gui(project_root: Path) -> int:
             out_writer = _SignalWriter(self.log_line.emit)
             try:
                 with contextlib.redirect_stdout(out_writer), contextlib.redirect_stderr(out_writer):
-                    run_pipeline(self.args, self.config, cancellation=self.cancellation)
+                    run_pipeline(
+                        self.args,
+                        self.config,
+                        cancellation=self.cancellation,
+                        progress_callback=self.progress_changed.emit,
+                    )
                 self.finished.emit("completed", "Pipeline run completed.")
             except PipelineCancelled as exc:
                 self.finished.emit("cancelled", str(exc))
@@ -181,6 +188,8 @@ def launch_gui(project_root: Path) -> int:
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
             layout.addWidget(self.progress)
+            self.progress_status = QLabel("Ready")
+            layout.addWidget(self.progress_status)
             self.log = QTextEdit()
             self.log.setReadOnly(True)
             layout.addWidget(self.log, 1)
@@ -494,9 +503,8 @@ def launch_gui(project_root: Path) -> int:
             self.cancel_btn.setText("Cancel")
             if running:
                 self.progress.setRange(0, 0)
-            else:
-                self.progress.setRange(0, 100)
-                self.progress.setValue(100)
+                self.progress.setValue(0)
+                self.progress_status.setText("Preparing book plan…")
 
         def _launch_from_ui(self, resume_mode: str) -> None:
             try:
@@ -527,19 +535,32 @@ def launch_gui(project_root: Path) -> int:
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
             self.worker.log_line.connect(self._append_log)
+            self.worker.progress_changed.connect(self._on_progress)
             self.worker.finished.connect(self._on_worker_finished)
             self.worker.finished.connect(lambda *_: self.worker_thread.quit())
             self.worker_thread.start()
 
+        def _on_progress(self, update: ProgressUpdate) -> None:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(update.percent)
+            self.progress_status.setText(format_progress_text(update))
+
         def _on_worker_finished(self, status: str, message: str) -> None:
             self._set_running(False)
+            current_percent = max(0, self.progress.value())
+            self.progress.setRange(0, 100)
+            self.progress.setValue(current_percent)
             if status == "completed":
+                self.progress.setValue(100)
+                self.progress_status.setText("Completed · 100%")
                 self._append_log(message)
                 QMessageBox.information(self, "AutoAudio", "Generation finished.")
             elif status == "cancelled":
+                self.progress_status.setText(f"Canceled · {current_percent}%")
                 self._append_log(f"Canceled: {message}")
                 QMessageBox.information(self, "AutoAudio", "Run canceled. Resume state was saved.")
             else:
+                self.progress_status.setText(f"Failed · {current_percent}%")
                 self._append_log(f"Failed: {message}")
                 QMessageBox.critical(self, "AutoAudio", f"Generation failed:\n{message}")
             self._prepopulate_from_checkpoint()

@@ -19,6 +19,7 @@ python auto_audiobook.py --version
 - Lossless chapter assembly with configurable disclosure, segment, and chapter spacing.
 - Resumable jobs with immutable book plans and artifact-integrity checkpoints.
 - Cooperative cancellation from the GUI or `Ctrl+C`.
+- BookPlan-weighted GUI progress with a session-based remaining-time estimate.
 - Verified AudioSeal marking, AI metadata sidecars, and optional C2PA provenance.
 - Matching CLI and four-tab PySide6 GUI configuration.
 
