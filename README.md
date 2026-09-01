@@ -13,7 +13,7 @@ python auto_audiobook.py --version
 ### 1) Python and dependencies
 
 AutoAudio v2 requires Python 3.11 or newer. EPUB input is handled by the
-MIT-licensed `pubparser` v0.1.0 dependency pinned in `requirements.txt`.
+MIT-licensed `pubparser` v0.1.1 dependency pinned in `requirements.txt`.
 
 Install project dependencies:
 
