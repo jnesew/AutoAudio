@@ -9,7 +9,7 @@ from pathlib import Path
 
 from core.cancellation import CancellationToken
 from core.checkpoint import CheckpointStore
-from core.config import AppConfig
+from core.config import AppConfig, QWEN_MODEL_CHOICES_BY_MODE, QWEN_PRESET_SPEAKERS
 from core.errors import PipelineCancelled, format_user_error
 from core.narrator import NarratorCatalog
 from core.pipeline import (
@@ -263,9 +263,9 @@ def launch_gui(project_root: Path) -> int:
                 self.narrator_profile_combo.addItem(profile.name, profile.id)
             self.narrator_detail = QLabel()
             self.narrator_detail.setWordWrap(True)
-            self.speaker_edit = QLineEdit()
+            self.speaker_combo = combo(QWEN_PRESET_SPEAKERS, "Eric")
             self.voice_instruct_edit = QLineEdit()
-            self.model_choice_edit = QLineEdit()
+            self.model_choice_combo = combo(QWEN_MODEL_CHOICES_BY_MODE["preset"], "1.7B")
             self.device_edit = QLineEdit()
             self.precision_edit = QLineEdit()
             self.language_edit = QLineEdit()
@@ -279,9 +279,9 @@ def launch_gui(project_root: Path) -> int:
             self.unload_model_checkbox = QCheckBox("Unload model after each generation")
             form.addRow("Narrator profile", self.narrator_profile_combo)
             form.addRow(self.narrator_detail)
-            form.addRow("Preset speaker", self.speaker_edit)
+            form.addRow("Preset speaker", self.speaker_combo)
             form.addRow("Voice/style instruction", self.voice_instruct_edit)
-            form.addRow("Model choice", self.model_choice_edit)
+            form.addRow("Model choice", self.model_choice_combo)
             form.addRow("Device", self.device_edit)
             form.addRow("Precision", self.precision_edit)
             form.addRow("Language", self.language_edit)
@@ -371,10 +371,12 @@ def launch_gui(project_root: Path) -> int:
                 return
             profile = self.narrator_catalog.get(str(profile_id))
             settings = profile.settings
-            self.speaker_edit.setText(settings.speaker)
-            self.speaker_edit.setEnabled(settings.voice_mode == "preset")
+            self._set_combo(self.speaker_combo, settings.speaker)
+            self.speaker_combo.setEnabled(settings.voice_mode == "preset")
             self.voice_instruct_edit.setText(settings.instruct)
-            self.model_choice_edit.setText(settings.model_choice)
+            self.model_choice_combo.clear()
+            self.model_choice_combo.addItems(QWEN_MODEL_CHOICES_BY_MODE[settings.voice_mode])
+            self._set_combo(self.model_choice_combo, settings.model_choice)
             self.device_edit.setText(settings.device)
             self.precision_edit.setText(settings.precision)
             self.language_edit.setText(settings.language)
@@ -446,9 +448,9 @@ def launch_gui(project_root: Path) -> int:
             args.segment_gap_ms = self.segment_gap_spin.value()
             args.chapter_gap_ms = self.chapter_gap_spin.value()
             args.narrator_profile = str(self.narrator_profile_combo.currentData())
-            args.speaker = self.speaker_edit.text().strip() or None
+            args.speaker = self.speaker_combo.currentText().strip() or None
             args.voice_instruct = self.voice_instruct_edit.text().strip() or None
-            args.model_choice = self.model_choice_edit.text().strip() or None
+            args.model_choice = self.model_choice_combo.currentText().strip() or None
             args.device = self.device_edit.text().strip() or None
             args.precision = self.precision_edit.text().strip() or None
             args.language = self.language_edit.text().strip() or None
@@ -569,6 +571,8 @@ def launch_gui(project_root: Path) -> int:
             self._restore_text(self.output_edit, state, "output_dir")
             self._set_combo(self.source_mode_combo, state.get("source_mode"))
             self._set_combo(self.narrator_profile_combo, state.get("narrator_profile"))
+            self._set_combo(self.speaker_combo, state.get("speaker"))
+            self._set_combo(self.model_choice_combo, state.get("model_choice"))
             self._set_combo(self.output_format_combo, state.get("output_format"))
             self._set_combo(self.comfyui_mode_combo, state.get("comfyui_mode"))
             self._set_combo(self.spoof_scenario_combo, state.get("comfyui_spoof_scenario"))
@@ -597,9 +601,7 @@ def launch_gui(project_root: Path) -> int:
             for widget, key in (
                 (self.target_words_per_segment_edit, "target_words_per_segment"),
                 (self.max_words_per_segment_edit, "max_words_per_segment"),
-                (self.speaker_edit, "speaker"),
                 (self.voice_instruct_edit, "voice_instruct"),
-                (self.model_choice_edit, "model_choice"),
                 (self.device_edit, "device"),
                 (self.precision_edit, "precision"),
                 (self.language_edit, "language"),

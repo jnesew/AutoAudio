@@ -93,3 +93,12 @@ def test_gui_source_contains_no_reference_voice_picker():
 
     assert "reference_audio" not in source
     assert "reference voice" not in source
+
+
+def test_gui_uses_dropdowns_for_bundled_speaker_and_model_choices():
+    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+
+    assert "self.speaker_combo = combo(QWEN_PRESET_SPEAKERS" in source
+    assert "self.model_choice_combo = combo(QWEN_MODEL_CHOICES_BY_MODE" in source
+    assert "self.speaker_edit = QLineEdit()" not in source
+    assert "self.model_choice_edit = QLineEdit()" not in source

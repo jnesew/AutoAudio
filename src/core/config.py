@@ -7,6 +7,26 @@ from typing import Literal
 from provenance.c2pa import ProvenanceConfig
 
 
+QWEN_PRESET_SPEAKERS = (
+    "Aiden",
+    "Dylan",
+    "Eric",
+    "Ono_anna",
+    "Ryan",
+    "Serena",
+    "Sohee",
+    "Uncle_fu",
+    "Vivian",
+)
+QWEN_MODEL_CHOICES_BY_MODE = {
+    "preset": ("0.6B", "1.7B"),
+    "design": ("1.7B",),
+}
+QWEN_MODEL_CHOICES = tuple(
+    dict.fromkeys(choice for choices in QWEN_MODEL_CHOICES_BY_MODE.values() for choice in choices)
+)
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Central app configuration with runtime/resource defaults."""
@@ -71,10 +91,17 @@ class GenerationSettings:
             raise ValueError("voice_mode must be 'preset' or 'design'.")
         if self.voice_mode == "preset" and not self.speaker.strip():
             raise ValueError("Preset voice mode requires a speaker name.")
+        if self.voice_mode == "preset" and self.speaker not in QWEN_PRESET_SPEAKERS:
+            raise ValueError(f"Unsupported Qwen preset speaker: {self.speaker!r}.")
         if self.voice_mode == "design" and not self.instruct.strip():
             raise ValueError("Designed voice mode requires a non-empty voice instruction.")
         if not self.model_choice.strip() or not self.device.strip() or not self.language.strip():
             raise ValueError("Qwen model, device, and language values cannot be empty.")
+        if self.model_choice not in QWEN_MODEL_CHOICES_BY_MODE[self.voice_mode]:
+            choices = ", ".join(QWEN_MODEL_CHOICES_BY_MODE[self.voice_mode])
+            raise ValueError(
+                f"Qwen {self.voice_mode} mode does not support model {self.model_choice!r}; choose {choices}."
+            )
         if self.seed < 0:
             raise ValueError("Qwen seed cannot be negative.")
         if self.max_new_tokens <= 0 or self.top_k <= 0:

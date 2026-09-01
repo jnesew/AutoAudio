@@ -38,7 +38,7 @@ from core.checkpoint import (
     validate_artifact,
 )
 from core.cancellation import CancellationToken
-from core.config import AppConfig, GenerationSettings
+from core.config import AppConfig, GenerationSettings, QWEN_MODEL_CHOICES, QWEN_PRESET_SPEAKERS
 from core.errors import (
     AudioStitchError,
     ComfyUIConnectionError,
@@ -560,9 +560,14 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         help="Lossless silence inserted between chapters in part files (0 disables).",
     )
     parser.add_argument("--narrator-profile", default="preset-eric-neutral")
-    parser.add_argument("--speaker", default=None, help="Override the selected preset profile's Qwen speaker.")
+    parser.add_argument(
+        "--speaker",
+        choices=QWEN_PRESET_SPEAKERS,
+        default=None,
+        help="Override the selected preset profile's built-in Qwen speaker.",
+    )
     parser.add_argument("--voice-instruct", default=None, help="Override the selected profile's voice/style instruction.")
-    parser.add_argument("--model-choice", default=None)
+    parser.add_argument("--model-choice", choices=QWEN_MODEL_CHOICES, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--precision", default=None)
     parser.add_argument("--language", default=None)
