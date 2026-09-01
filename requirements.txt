@@ -1,5 +1,5 @@
-beautifulsoup4>=4.12
-EbookLib>=0.18
+# pubparser v0.1.0; immutable tag target pinned for reproducible installs.
+pubparser @ git+https://github.com/jnesew/pubparser.git@6a03fa235840f02e26103b369ea2c694af408498
 websocket-client>=1.8
 
 PySide6>=6.7

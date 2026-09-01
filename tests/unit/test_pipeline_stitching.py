@@ -12,34 +12,37 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-# Mock uninstalled dependencies
-if "ebooklib" not in sys.modules:
-    ebooklib_module = types.ModuleType("ebooklib")
-    ebooklib_module.ITEM_COVER = 1
-    ebooklib_module.ITEM_IMAGE = 2
-    ebooklib_module.ITEM_DOCUMENT = 3
-    epub_module = types.ModuleType("ebooklib.epub")
-    ebooklib_module.epub = epub_module
-    sys.modules["ebooklib"] = ebooklib_module
-    sys.modules["ebooklib.epub"] = epub_module
-
-if "bs4" not in sys.modules:
-    bs4_module = types.ModuleType("bs4")
-    bs4_module.BeautifulSoup = object
-    sys.modules["bs4"] = bs4_module
-
+# Mock the uninstalled network client dependency.
 if "websocket" not in sys.modules:
     websocket_module = types.ModuleType("websocket")
     websocket_module.WebSocket = object
     sys.modules["websocket"] = websocket_module
 
 
-from core.pipeline import _sanitize_ffmpeg_metadata_value, combine_audio_files
+from core.pipeline import _sanitize_ffmpeg_metadata_value, build_qwen_book_plan, combine_audio_files, resolve_metadata
+from core.segmentation import SegmentPolicy
+from metadata.epub_parser import ParsedEpub
+from metadata.models import BookMetadata
 
 
 def test_sanitize_ffmpeg_metadata_value_removes_newlines():
     assert _sanitize_ffmpeg_metadata_value("Chapter 2: I.\nIntroduction") == "Chapter 2: I. Introduction"
     assert _sanitize_ffmpeg_metadata_value("\n\n") is None
+
+
+def test_book_plan_does_not_skip_chapter_for_gutenberg_words_alone():
+    plan = build_qwen_book_plan(
+        [("Preface", "Project Gutenberg publishes this sentence, but it is legitimate narration text.")],
+        input_hash="input",
+        settings_hash="settings",
+        workflow_hash="workflow",
+        segment_policy=SegmentPolicy(target_words=20, max_words=30),
+    )
+
+    assert plan.chapters[0].skipped_reason is None
+    assert [segment.text for segment in plan.chapters[0].segments] == [
+        "Project Gutenberg publishes this sentence, but it is legitimate narration text."
+    ]
 
 
 def test_combine_audio_files_retries_without_cover(tmp_path):
@@ -83,3 +86,51 @@ def test_combine_audio_files_retries_without_cover(tmp_path):
     assert "-disposition:v" in ffmpeg_calls[1]
     assert "-disposition:v" not in ffmpeg_calls[2]
     assert "title=Chapter 2: I. Introduction" in ffmpeg_calls[2]
+
+
+def test_resolve_metadata_reuses_parsed_epub_without_reopening(tmp_path):
+    parsed = ParsedEpub(
+        metadata=BookMetadata(title="Embedded title", author="Embedded author"),
+        text_blocks=(("Chapter One", "Long enough chapter text for the already parsed EPUB snapshot."),),
+        cover=None,
+        diagnostics=(),
+        gutenberg_detected=False,
+        gutenberg_changed=False,
+    )
+    args = types.SimpleNamespace(fetch_metadata=False, gutenberg_id="", title="", author="")
+
+    with patch("core.pipeline.parse_epub", side_effect=AssertionError("EPUB was reopened")):
+        metadata = resolve_metadata(
+            args,
+            str(tmp_path / "book.epub"),
+            "epub",
+            str(tmp_path),
+            parsed_epub=parsed,
+        )
+
+    assert metadata.title == "Embedded title"
+    assert metadata.author == "Embedded author"
+
+
+def test_resolve_metadata_treats_cover_write_failure_as_nonfatal(tmp_path):
+    parsed = ParsedEpub(
+        metadata=BookMetadata(title="Embedded title", author="Embedded author"),
+        text_blocks=(),
+        cover=None,
+        diagnostics=(),
+        gutenberg_detected=False,
+        gutenberg_changed=False,
+    )
+    args = types.SimpleNamespace(fetch_metadata=False, gutenberg_id="", title="", author="")
+
+    with patch("core.pipeline.write_cover_art", side_effect=OSError("read-only output")):
+        metadata = resolve_metadata(
+            args,
+            str(tmp_path / "book.epub"),
+            "epub",
+            str(tmp_path),
+            parsed_epub=parsed,
+        )
+
+    assert metadata.title == "Embedded title"
+    assert metadata.cover_image_path is None

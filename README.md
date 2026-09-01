@@ -6,6 +6,9 @@ AutoAudio converts a book file (EPUB, TXT, Markdown, or RST) into chapter and pa
 
 ### 1) Python and dependencies
 
+AutoAudio v2 requires Python 3.11 or newer. EPUB input is handled by the
+MIT-licensed `pubparser` v0.1.0 dependency pinned in `requirements.txt`.
+
 Install project dependencies:
 
 ```bash
@@ -121,6 +124,12 @@ Metadata precedence is:
 2. Embedded source metadata
 3. Fetched online metadata (if enabled)
 4. Fallback defaults
+
+EPUB parsing is offline. AutoAudio reads spine documents in publication order,
+uses compatibility recovery for imperfect EPUBs, extracts the embedded cover and
+metadata in the same parse, and removes recognized Project Gutenberg distribution
+headers and license footers before freezing the resumable BookPlan. Remote EPUB
+resources are never fetched by the parser.
 
 ### ComfyUI connection/runtime controls
 
