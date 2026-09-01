@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from core.cancellation import CancellationToken
 from core.config import GenerationSettings
 
 
@@ -36,5 +37,6 @@ class ComfyUIClient(Protocol):
         text_segment: str,
         settings: GenerationSettings,
         timeout_seconds: float | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> AudioArtifact:
         """Generate audio for a text segment and return audio bytes + extension."""

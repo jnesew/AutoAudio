@@ -82,9 +82,10 @@ python auto_audiobook.py --gui
 Notes:
 
 - GUI mode requires `PySide6` (already included in `requirements.txt`).
-- In GUI, pick input/output paths, choose a narrator profile, optionally adjust its speaker/instruction/language/seed, then click **Start**.
+- The four GUI tabs expose the same book-planning, narrator, output/runtime, metadata, and provenance controls as the CLI.
+- Choose a narrator profile, optionally tune its Qwen settings, then click **Start**. There is no reference-audio picker or cloning configuration.
 - Preset profiles are the stable default. VoiceDesign profiles are labeled experimental because independent generations can drift.
-- If a compatible checkpoint exists, the GUI enables **Resume** automatically.
+- **Cancel** cooperatively stops ComfyUI work at a safe boundary and saves the run as resumable. The GUI enables **Resume** for compatible running, failed, or canceled checkpoints.
 
 ## CLI arguments
 
@@ -148,6 +149,8 @@ resources are never fetched by the parser.
 - `--resume {auto,yes,no}`
 - `--gui` (launches desktop GUI instead of CLI pipeline run)
 
+Press `Ctrl+C` during a CLI run to request cooperative cancellation. AutoAudio interrupts/removes the active ComfyUI prompt when possible, finishes only the current safe file operation, records checkpoint status `cancelled`, and exits with code `130`. Resume with the same compatible settings and `--resume yes`.
+
 ### Provenance / C2PA controls
 
 - `--provenance-enabled` enables post-processing provenance signing/embedding after each final chapter and part artifact is written.
@@ -186,7 +189,7 @@ AutoAudio validates required assertion fields before signing and raises explicit
 
 ### Verify AI marking and watermarking
 
-The system automatically applies a public default fallback secret key (`default_public_autoaudio_key_123`) to guarantee consistent AudioSeal PyTorch watermarking happens.
+The system automatically applies a bundled public fallback key to keep AudioSeal watermarking deterministic when no override is configured. It is not treated as a private credential.
 During generation, segment sidecars record direct AudioSeal verification. Chapter and part sidecars record hash-checked inheritance from their verified source artifacts. Successfully assembled segment files and sidecars are removed together. Verify retained chapter and part outputs with:
 
 ```bash

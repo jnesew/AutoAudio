@@ -6,6 +6,7 @@ from typing import Any
 
 from comfyui.client import AudioArtifact, ComfyUIConnectionError, ComfyUIProtocolError, ComfyUITimeoutError
 from comfyui.workflow_loader import build_runtime_workflow
+from core.cancellation import CancellationToken
 from core.config import GenerationSettings
 
 
@@ -83,8 +84,11 @@ class SpoofComfyUIClient:
         text_segment: str,
         settings: GenerationSettings,
         timeout_seconds: float | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> AudioArtifact:
         del timeout_seconds
+        if cancellation:
+            cancellation.raise_if_cancelled()
         workflow = build_runtime_workflow(
             workflow_template=workflow_template,
             text_segment=text_segment,
@@ -92,11 +96,15 @@ class SpoofComfyUIClient:
         )
 
         prompt = self.endpoint.prompt(workflow, self.client_id)
+        if cancellation:
+            cancellation.raise_if_cancelled()
         prompt_id = prompt.get("prompt_id")
         if not prompt_id:
             raise ComfyUIProtocolError("Spoof endpoint returned no prompt_id")
 
         events = self.endpoint.ws_events(prompt_id)
+        if cancellation:
+            cancellation.raise_if_cancelled()
         completed = any(e.get("type") == "executing" and e.get("data", {}).get("node") is None for e in events)
         if not completed:
             raise ComfyUITimeoutError(f"Spoof timeout waiting for prompt {prompt_id}")
@@ -111,6 +119,8 @@ class SpoofComfyUIClient:
                     subfolder=audio_file["subfolder"],
                     folder_type=audio_file["type"],
                 )
+                if cancellation:
+                    cancellation.raise_if_cancelled()
                 return AudioArtifact(content=content, extension=".flac")
 
         raise ComfyUIProtocolError("Spoof /history response missing audio payload")
