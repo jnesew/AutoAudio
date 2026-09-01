@@ -6,7 +6,7 @@ This document tracks evidence required before `release/v2.0.0` can merge into `m
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Unit and spoof/integration suite | Passed | 103 tests after narrator-control work |
+| Unit and spoof/integration suite | Passed | 108 tests after progress/ETA work |
 | Import and compile checks | Passed | Python 3.12 release workspace |
 | Workflow fixtures | Passed | CustomVoice and VoiceDesign adapters covered |
 | Synthetic EPUB fixtures | Passed | pubparser adapter tests |

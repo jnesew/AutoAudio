@@ -173,6 +173,7 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 return (b"RIFF....FAKEAUDIO-2", ".flac")
 
             second_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="yes")
+            progress_updates = []
             with patch("core.pipeline.assemble_lossless_master", side_effect=fake_assemble), patch(
                 "core.pipeline.encode_lossless_master", side_effect=fake_final_encode
             ), patch(
@@ -184,7 +185,16 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             ), patch(
                 "core.pipeline.ensure_disclosure_asset", side_effect=fake_disclosure_asset
             ):
-                run_pipeline(second_args, config)
+                run_pipeline(second_args, config, progress_callback=progress_updates.append)
+
+            self.assertTrue(progress_updates)
+            self.assertEqual(progress_updates[-1].phase, "Completed")
+            self.assertEqual(progress_updates[-1].percent, 100)
+            self.assertEqual(
+                [update.percent for update in progress_updates],
+                sorted(update.percent for update in progress_updates),
+            )
+            self.assertTrue(any(update.chapter_number == 1 for update in progress_updates))
 
             # One segment should have resumed from checkpoint, so only remaining segments regenerate.
             self.assertGreaterEqual(second_call_count["n"], 1)
