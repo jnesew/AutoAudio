@@ -2,6 +2,12 @@
 
 AutoAudio converts a book file (EPUB, TXT, Markdown, or RST) into chapter and part audiobook files using **ComfyUI + Qwen3-TTS**.
 
+The current v2 preparation build identifies itself as `2.0.0.dev0`. Set `AUTOAUDIO_VERSION` only when producing an intentionally versioned build.
+
+```bash
+python auto_audiobook.py --version
+```
+
 ## What you need before running
 
 ### 1) Python and dependencies
@@ -14,6 +20,8 @@ Install project dependencies:
 ```bash
 python -m pip install -r requirements.txt
 ```
+
+The pubparser source is pinned to an exact commit. Other direct requirements are compatibility ranges; the release test matrix must capture an exact, platform-specific resolution before v2 packaging.
 
 ### 2) System tools
 
@@ -161,18 +169,22 @@ Press `Ctrl+C` during a CLI run to request cooperative cancellation. AutoAudio i
 - `--provenance-claim-generator <value>` sets the claim generator string in the manifest.
 - `--provenance-failure-mode {soft-fail,hard-fail}` controls enforcement mode (`hard-fail` stops the run if provenance fails).
 
+The default claim generator is `AutoAudio/2.0.0.dev0` for this preparation build.
+
 When provenance is enabled, AutoAudio populates the following C2PA assertions:
 
 - `c2pa.ai.generative`
   - `generator.name`: `Qwen3-TTS` for bundled workflows.
-  - `generator.version`: sourced from the Qwen node's `model_choice` value.
+  - `generator.version`: the effective `model_choice` after narrator-profile and CLI/GUI overrides.
 - `c2pa.actions`
   - Includes action `c2pa.created`.
-  - `softwareAgent.name` / `softwareAgent.version`: populated from AutoAudio runtime metadata (`AutoAudio` + `AUTOAUDIO_VERSION` env, default `dev`).
-  - `softwareAgent.backend.name` / `softwareAgent.backend.version`: sourced from workflow metadata (`class_type` and `_meta.title` when present).
-- `c2pa.hash.data`
-  - `alg`: `sha256`.
-  - `hash`: base64-encoded SHA-256 digest of final artifact bytes.
+  - `softwareAgent.name` / `softwareAgent.version`: `AutoAudio` plus the build version (or an explicit `AUTOAUDIO_VERSION` override).
+  - `softwareAgent.backend.name`: the effective Qwen ComfyUI node `class_type`.
+  - `softwareAgent.backend.version`: an explicit workflow `_meta.version` when exported; otherwise `unreported` (the human-readable node title is not treated as a version).
+- `com.autoaudio.pipeline`
+  - Records a SHA-256 digest explicitly scoped to the encoded source bytes before C2PA embedding.
+
+`c2patool` creates the container-specific C2PA hard binding; AutoAudio does not inject a synthetic `c2pa.hash.data` assertion without valid manifest exclusion ranges. After successful embedding, AutoAudio hashes the complete final container again, refreshes the AI-marking sidecar, and records that same final digest in checkpoint and provenance state.
 
 AutoAudio validates required assertion fields before signing and raises explicit schema errors when required fields are missing. Manifest identifiers and embedding paths are persisted to checkpoint state for later audit.
 
@@ -187,6 +199,8 @@ AutoAudio validates required assertion fields before signing and raises explicit
 - Resume checkpoint state: `<output-dir>/.autoaudio_state/checkpoint_state.json`
 - Immutable synthesis plan: `<output-dir>/.autoaudio_state/book_plan.json`
 
+Chapter and book titles are treated as untrusted metadata when used in filenames. AutoAudio normalizes them into a single cross-platform component, removes path/control characters, handles Windows device names, and applies a UTF-8 byte limit. Full original titles remain in container metadata.
+
 ### Verify AI marking and watermarking
 
 The system automatically applies a bundled public fallback key to keep AudioSeal watermarking deterministic when no override is configured. It is not treated as a private credential.
@@ -195,8 +209,7 @@ During generation, segment sidecars record direct AudioSeal verification. Chapte
 ```bash
 python src/provenance/verify.py --output-dir "<output-dir>"
 ```
-The command exits with a non-zero status if any artifact is missing `ai_*` tags,
-missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not applied/verified.
+The command exits with a non-zero status if any publishable artifact is missing `ai_*` tags, missing a `.<ext>.ai.json` sidecar, has a stale whole-file SHA-256 digest, or reports an unverified watermark. Internal `.autoaudio_state` audio is excluded; cached `.segments` are checked only with `--include-segments`.
 
 ## Troubleshooting
 
@@ -210,4 +223,4 @@ missing a `.<ext>.ai.json` sidecar, or has a manifest that reports watermark not
 
 AutoAudio source code is licensed under the MIT License. See `LICENSE`.
 
-Third-party dependencies are licensed under their own terms. See `THIRD_PARTY_DEPENDENCIES.md`.
+Third-party dependencies are licensed under their own terms. See `THIRD_PARTY_DEPENDENCIES.md` and `LICENSES/README.md`; binary distributors must also preserve notices shipped inside the exact wheels and external runtime components they bundle.

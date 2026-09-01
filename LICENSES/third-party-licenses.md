@@ -1,3 +1,7 @@
+# Installed dependency license snapshot
+
+This table records one development-environment resolution. It is not a dependency lock and does not replace license files bundled inside binary wheels. PyTorch was absent from the generator output; its upstream top-level license is preserved separately in `pytorch-BSD-3-Clause.txt`. PySide6 reported its SPDX choices but no embedded text, so distributors must preserve the Qt for Python, Qt, and Shiboken license files from the exact wheels they ship. See `README.md` in this directory and `../THIRD_PARTY_DEPENDENCIES.md`.
+
 | Name             | Version | License                                                 | LicenseText                                                                         |
 |------------------|---------|---------------------------------------------------------|-------------------------------------------------------------------------------------|
 | PySide6          | 6.11.0  | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only           | UNKNOWN                                                                             |

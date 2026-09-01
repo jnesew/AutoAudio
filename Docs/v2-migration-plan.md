@@ -43,7 +43,12 @@ Planned stages:
    - Add thread-safe cooperative cancellation for GUI and `SIGINT`, interrupt the active ComfyUI prompt, and make canceled checkpoints resumable.
    - Never persist provenance private-key passwords in checkpoint UI state.
 9. `fix/v2-metadata-packaging`
-   - Correct provenance model identity, final artifact hashes, filename safety, dependency notices, and documentation.
+   - Derive Qwen model identity from effective generation settings and report backend versions only from explicit version metadata.
+   - Let the C2PA tool create format-aware hard bindings; label AutoAudio's source digest as pre-embedding rather than publishing an invalid whole-file binding.
+   - Refresh AI-marking sidecars and checkpoint/provenance records from complete final container bytes after every successful C2PA mutation.
+   - Bind the v2 AI-marking sidecar schema to checkpoint compatibility so stale pre-final-hash state cannot be resumed silently.
+   - Normalize untrusted chapter/book metadata into bounded, cross-platform filename components.
+   - Verify sidecar hashes, ignore internal audio during output audits, centralize the verification entry point, and reconcile direct dependency notices.
 10. `release/v2.0.0`
    - Run the release test matrix, migration review, and packaged smoke tests before merging to `main` and tagging.
 

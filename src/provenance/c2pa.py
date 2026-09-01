@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import logging
@@ -10,9 +9,11 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from core.version import default_claim_generator
 
 
 class ProvenanceError(RuntimeError):
@@ -27,7 +28,7 @@ class ProvenanceConfig:
     key_password: str = ""
     hard_fail: bool = False
     tool: str = "c2patool"
-    claim_generator: str = "autoaudio"
+    claim_generator: str = field(default_factory=default_claim_generator)
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,8 @@ class ProvenanceRuntimeMetadata:
 class ProvenanceResult:
     manifest_id: str
     embedding_path: str
+    source_sha256: str
+    final_sha256: str
 
 
 _EXTENSION_TO_EMBEDDING_PATH = {
@@ -57,6 +60,17 @@ _EXTENSION_TO_EMBEDDING_PATH = {
     ".aif": "chunk",
     ".aiff": "chunk",
 }
+_EXTENSION_TO_MEDIA_TYPE = {
+    ".mp3": "audio/mpeg",
+    ".mp4": "audio/mp4",
+    ".m4a": "audio/mp4",
+    ".m4b": "audio/mp4",
+    ".flac": "audio/flac",
+    ".wav": "audio/wav",
+    ".wave": "audio/wav",
+    ".aif": "audio/aiff",
+    ".aiff": "audio/aiff",
+}
 
 
 class C2PAAssertionBuilder:
@@ -69,7 +83,6 @@ class C2PAAssertionBuilder:
         assertions = [
             self._build_ai_generative_assertion(),
             self._build_actions_assertion(),
-            self._build_hash_data_assertion(),
             self._build_pipeline_assertion(),
         ]
         validate_assertions(assertions)
@@ -110,22 +123,6 @@ class C2PAAssertionBuilder:
             },
         }
 
-    def _build_hash_data_assertion(self) -> dict[str, Any]:
-        with open(self.artifact_path, "rb") as file:
-            payload = file.read()
-
-        digest = hashlib.sha256(payload).digest()
-        digest_b64 = base64.b64encode(digest).decode("ascii")
-        return {
-            "label": "c2pa.hash.data",
-            "data": {
-                "alg": "sha256",
-                "hash": digest_b64,
-                "pad": 0,
-                "exclusions": [],
-            },
-        }
-
     def _build_pipeline_assertion(self) -> dict[str, Any]:
         artifact = Path(self.artifact_path)
         return {
@@ -133,6 +130,8 @@ class C2PAAssertionBuilder:
             "data": {
                 "artifact": artifact.name,
                 "container_embedding": self.embedding_path,
+                "source_sha256": _sha256_hex(artifact),
+                "source_hash_scope": "pre-c2pa-embedding",
             },
         }
 
@@ -162,7 +161,7 @@ def validate_assertions(assertions: list[dict[str, Any]]) -> None:
     schema = {
         "c2pa.ai.generative": ["data.generator.name", "data.generator.version"],
         "c2pa.actions": ["data.actions"],
-        "c2pa.hash.data": ["data.alg", "data.hash"],
+        "com.autoaudio.pipeline": ["data.artifact", "data.source_sha256", "data.source_hash_scope"],
     }
 
     by_label = {item.get("label"): item for item in assertions}
@@ -183,6 +182,14 @@ def validate_assertions(assertions: list[dict[str, Any]]) -> None:
     if not has_created_action:
         errors.append("assertion 'c2pa.actions' must contain action 'c2pa.created'")
 
+    pipeline_assertion = by_label.get("com.autoaudio.pipeline", {})
+    source_sha256 = _read_required(pipeline_assertion, "data.source_sha256")
+    if isinstance(source_sha256, str) and not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        errors.append("assertion 'com.autoaudio.pipeline' contains an invalid source SHA-256")
+    source_scope = _read_required(pipeline_assertion, "data.source_hash_scope")
+    if source_scope and source_scope != "pre-c2pa-embedding":
+        errors.append("assertion 'com.autoaudio.pipeline' contains an invalid source hash scope")
+
     if errors:
         raise ProvenanceError("Assertion schema validation failed: " + "; ".join(errors))
 
@@ -194,14 +201,29 @@ def embedding_path_for_artifact(path: str | Path) -> str:
     return _EXTENSION_TO_EMBEDDING_PATH[extension]
 
 
+def media_type_for_artifact(path: str | Path) -> str:
+    extension = Path(path).suffix.lower()
+    if extension not in _EXTENSION_TO_MEDIA_TYPE:
+        raise ProvenanceError(f"Unsupported provenance media type: {extension or '<none>'}")
+    return _EXTENSION_TO_MEDIA_TYPE[extension]
+
+
 def parse_model_identity_version(value: str) -> tuple[str, str]:
     if not value:
         return "", ""
 
-    match = re.match(r"^(?P<name>[A-Za-z0-9_.]+?)-(?P<version>[A-Za-z0-9_.-]+)$", value)
+    match = re.match(r"^(?P<name>.+?)[-_/](?P<version>v?\d[A-Za-z0-9_.-]*)$", value.strip())
     if match:
         return match.group("name"), match.group("version")
-    return value, "unknown"
+    return value.strip(), "unknown"
+
+
+def _sha256_hex(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _build_manifest(
@@ -222,7 +244,7 @@ def _build_manifest(
         "vendor": "AutoAudio",
         "claim_generator": claim_generator,
         "title": artifact.name,
-        "format": artifact.suffix.lower().lstrip("."),
+        "format": media_type_for_artifact(artifact),
         "instance_id": manifest_id,
         "assertions": assertions,
     }
@@ -280,6 +302,7 @@ def apply_c2pa_provenance(
         raise ProvenanceError(f"C2PA private key not found: {config.key_path}")
 
     artifact_path = str(artifact_path)
+    source_sha256 = _sha256_hex(artifact_path)
     embedding_path = embedding_path_for_artifact(artifact_path)
     manifest_id = f"urn:uuid:{uuid.uuid4()}"
     manifest = _build_manifest(
@@ -305,7 +328,12 @@ def apply_c2pa_provenance(
 
         os.replace(signed_output_path, artifact_path)
 
-    return ProvenanceResult(manifest_id=manifest_id, embedding_path=embedding_path)
+    return ProvenanceResult(
+        manifest_id=manifest_id,
+        embedding_path=embedding_path,
+        source_sha256=source_sha256,
+        final_sha256=_sha256_hex(artifact_path),
+    )
 
 
 def apply_c2pa_with_policy(

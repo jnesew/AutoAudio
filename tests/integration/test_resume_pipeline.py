@@ -87,7 +87,11 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             output_dir = tmp / "output"
             project_root = tmp / "project"
             (project_root / "resources" / "workflows").mkdir(parents=True)
-            (project_root / "resources" / "workflows" / "qwen3_tts_custom_voice.json").write_text("{}", encoding="utf-8")
+            bundled_workflow = PROJECT_ROOT / "resources" / "workflows" / "qwen3_tts_custom_voice.json"
+            (project_root / "resources" / "workflows" / "qwen3_tts_custom_voice.json").write_text(
+                bundled_workflow.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
             (project_root / "resources" / "narrators").mkdir(parents=True)
             bundled_profiles = PROJECT_ROOT / "resources" / "narrators" / "default_profiles.json"
             (project_root / "resources" / "narrators" / "default_profiles.json").write_text(
