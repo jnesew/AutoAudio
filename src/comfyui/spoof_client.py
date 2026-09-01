@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import io
 import itertools
+import math
+import struct
+import wave
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,12 +14,30 @@ from core.cancellation import CancellationToken
 from core.config import GenerationSettings
 
 
+def _default_spoof_audio_payload() -> bytes:
+    """Build deterministic, valid 24 kHz mono PCM for end-to-end spoof runs."""
+    sample_rate = 24_000
+    frame_count = sample_rate * 2
+    frames = bytearray()
+    for index in range(frame_count):
+        sample = int(32767 * 0.08 * math.sin(2 * math.pi * 220 * index / sample_rate))
+        frames.extend(struct.pack("<h", sample))
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(frames)
+    return output.getvalue()
+
+
 @dataclass
 class SpoofComfyUIEndpoint:
     """Deterministic in-memory spoof for ComfyUI's /prompt, /history, /view, and ws events."""
 
     scenario: str = "success"
-    audio_payload: bytes = b"RIFF....FAKEAUDIO"
+    audio_payload: bytes = field(default_factory=_default_spoof_audio_payload)
     _prompt_counter: itertools.count = field(default_factory=lambda: itertools.count(1), init=False)
     _audio_store: dict[tuple[str, str, str], bytes] = field(default_factory=dict, init=False)
 
@@ -25,7 +47,7 @@ class SpoofComfyUIEndpoint:
             raise ComfyUIConnectionError("Spoofed connection refused for /prompt")
 
         prompt_id = f"prompt-{next(self._prompt_counter)}"
-        key = (f"{prompt_id}.flac", "", "output")
+        key = (f"{prompt_id}.wav", "", "output")
         self._audio_store[key] = self.audio_payload
         return {"prompt_id": prompt_id}
 
@@ -42,7 +64,7 @@ class SpoofComfyUIEndpoint:
         if self.scenario == "malformed_history":
             return {prompt_id: {"outputs": {"nodeA": {"not_audio": []}}}}
 
-        filename = f"{prompt_id}.flac"
+        filename = f"{prompt_id}.wav"
         return {
             prompt_id: {
                 "outputs": {
@@ -121,6 +143,7 @@ class SpoofComfyUIClient:
                 )
                 if cancellation:
                     cancellation.raise_if_cancelled()
-                return AudioArtifact(content=content, extension=".flac")
+                extension = "." + audio_file["filename"].rsplit(".", 1)[-1].lower()
+                return AudioArtifact(content=content, extension=extension)
 
         raise ComfyUIProtocolError("Spoof /history response missing audio payload")

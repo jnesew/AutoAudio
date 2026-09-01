@@ -18,7 +18,7 @@ if "websocket" not in sys.modules:
     websocket_stub.WebSocketTimeoutException = TimeoutError
     sys.modules["websocket"] = websocket_stub
 
-from comfyui.real_client import RealComfyUIClient
+from comfyui.real_client import RealComfyUIClient, _bounded_http_timeout
 from comfyui.spoof_client import SpoofComfyUIClient
 from comfyui.workflow_loader import load_workflow_template
 from core.cancellation import CancellationToken
@@ -58,7 +58,7 @@ def test_real_client_removes_and_interrupts_cancelled_prompt():
     client = RealComfyUIClient("127.0.0.1:8188")
     workflow = load_workflow_template(PROJECT_ROOT / "resources" / "workflows" / "qwen3_tts_custom_voice.json")
 
-    with patch.object(client, "_queue_prompt", return_value="prompt-7"), patch.object(
+    with patch.object(client, "_queue_prompt", return_value="prompt-7") as queue_prompt, patch.object(
         client,
         "_wait_for_completion",
         side_effect=PipelineCancelled("cancelled"),
@@ -71,6 +71,8 @@ def test_real_client_removes_and_interrupts_cancelled_prompt():
                 cancellation=CancellationToken(),
             )
 
+    queue_prompt.assert_called_once()
+    assert queue_prompt.call_args.kwargs["timeout_seconds"] == 120
     cancel_prompt.assert_called_once_with("prompt-7")
 
 
@@ -100,6 +102,13 @@ def test_real_client_websocket_wait_polls_cancellation():
             client._wait_for_completion("prompt-8", timeout_seconds=5, cancellation=token)
 
     assert socket.closed is True
+
+
+def test_real_client_http_phases_have_bounded_timeouts():
+    assert _bounded_http_timeout(None) == 30.0
+    assert _bounded_http_timeout(900) == 30.0
+    assert _bounded_http_timeout(5.5) == 5.5
+    assert _bounded_http_timeout(0) == 0.1
 
 
 def test_cancelled_pipeline_writes_resumable_checkpoint_without_secret(tmp_path):
