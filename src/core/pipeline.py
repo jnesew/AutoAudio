@@ -1531,8 +1531,16 @@ def build_app_config(args: argparse.Namespace, project_root: Path) -> AppConfig:
     )
 
 
+def runtime_project_root() -> Path:
+    """Use the checkout root for source runs and the working directory for installed runs."""
+    source_root = Path(__file__).resolve().parents[2]
+    if (source_root / "pyproject.toml").is_file() and (source_root / "resources").is_dir():
+        return source_root
+    return Path.cwd()
+
+
 def main(argv: list[str] | None = None) -> None:
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = runtime_project_root()
     parser = build_argument_parser(project_root)
     args = parser.parse_args(argv)
 

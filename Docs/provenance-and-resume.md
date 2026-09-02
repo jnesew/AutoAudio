@@ -22,7 +22,7 @@ Lossless assembly validates every source sidecar and source hash. Final-containe
 Verify retained output with:
 
 ```bash
-python scripts/verify.py --output-dir "/path/to/audiobook"
+autoaudio-verify --output-dir "/path/to/audiobook"
 ```
 
 Add `--include-segments` when auditing a job that still retains segment-cache files. Internal `.autoaudio_state` audio is excluded from the publishable-output audit.

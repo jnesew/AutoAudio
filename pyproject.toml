@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AutoAudio"
+dynamic = ["version"]
+description = "Non-cloning audiobook generation with Qwen3-TTS, AudioSeal marking, and optional C2PA provenance"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "LICENSES/*", "THIRD_PARTY_DEPENDENCIES.md"]
+authors = [{name = "AutoAudio contributors"}]
+keywords = ["audiobook", "qwen3-tts", "comfyui", "audioseal", "c2pa"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Environment :: X11 Applications :: Qt",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+  "pubparser @ git+https://github.com/jnesew/pubparser.git@60bfedfe8d9d716a22016a0fe63e7b015f50ba1d",
+  "websocket-client>=1.8",
+  "PySide6>=6.7",
+  "numpy",
+  "torch",
+  "librosa",
+  "soundfile",
+  "audioseal==0.2.0",
+]
+
+[project.urls]
+Repository = "https://github.com/jnesew/AutoAudio"
+Issues = "https://github.com/jnesew/AutoAudio/issues"
+
+[project.scripts]
+autoaudio = "core.pipeline:main"
+autoaudio-verify = "provenance.verify:main"
+
+[tool.setuptools]
+packages = [
+  "autoaudio_resources",
+  "comfyui",
+  "core",
+  "gui",
+  "metadata",
+  "provenance",
+]
+package-dir = {"" = "src", autoaudio_resources = "resources"}
+include-package-data = false
+
+[tool.setuptools.dynamic]
+version = {attr = "core.version.AUTOAUDIO_VERSION"}
+
+[tool.setuptools.package-data]
+autoaudio_resources = ["narrators/*.json", "workflows/*.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
