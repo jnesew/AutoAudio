@@ -4,7 +4,7 @@ AutoAudio converts EPUB, TXT, Markdown, and RST books into chapter and part audi
 
 Version 2 is deliberately non-cloning: it supports Qwen built-in preset speakers and text-designed voices, but it never accepts reference-voice audio. Every narration segment receives a verified non-audible AudioSeal watermark, and an audible synthetic-audio disclosure is placed once at the beginning of each chapter.
 
-The current release candidate identifies itself as `2.0.0.dev0`:
+The current release candidate identifies itself as `2.0.0`:
 
 ```bash
 autoaudio --version
