@@ -11,3 +11,5 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+audiobook_output/
+books/

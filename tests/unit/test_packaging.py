@@ -34,7 +34,7 @@ def test_pyproject_uses_runtime_version_as_single_source():
     assert project["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "core.version.AUTOAUDIO_VERSION"
     }
-    assert AUTOAUDIO_VERSION == "2.0.0.dev0"
+    assert AUTOAUDIO_VERSION == "2.0.0"
 
 
 def test_pyproject_and_requirements_declare_the_same_direct_dependencies():

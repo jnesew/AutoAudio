@@ -156,7 +156,7 @@ def test_chapter_publish_refreshes_sidecar_and_checkpoints_final_c2pa_hash(tmp_p
         model_version="1.7B",
         backend_name="FB_Qwen3TTSCustomVoice",
         backend_version="unreported",
-        software_version="2.0.0.dev0",
+        software_version="2.0.0",
     )
 
     with patch("core.pipeline.encode_lossless_master", side_effect=fake_encode), patch(

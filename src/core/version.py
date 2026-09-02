@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 
-AUTOAUDIO_VERSION = "2.0.0.dev0"
+AUTOAUDIO_VERSION = "2.0.0"
 
 
 def runtime_autoaudio_version() -> str:

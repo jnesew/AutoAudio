@@ -35,7 +35,7 @@ def _runtime() -> ProvenanceRuntimeMetadata:
         backend_name="FB_Qwen3TTSCustomVoice",
         backend_version="unreported",
         software_name="AutoAudio",
-        software_version="2.0.0.dev0",
+        software_version="2.0.0",
     )
 
 
