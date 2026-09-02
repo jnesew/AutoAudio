@@ -12,19 +12,49 @@ from metadata.gutenberg_catalog import (
 )
 
 
-OPDS = b"""<?xml version="1.0" encoding="utf-8"?>
+SEARCH_OPDS = b"""<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:dcterms="http://purl.org/dc/terms/">
   <link rel="next" href="/ebooks/search.opds/?query=alice&amp;start_index=26" />
   <entry>
-    <id>https://www.gutenberg.org/ebooks/11</id>
+    <id>https://www.gutenberg.org/ebooks/11.opds</id>
     <title>Alice's Adventures in Wonderland</title>
-    <author><name>Carroll, Lewis</name></author>
+    <content type="text">12345 downloads</content>
+    <link rel="subsection" type="application/atom+xml;profile=opds-catalog"
+          href="/ebooks/11.opds" />
+  </entry>
+</feed>
+"""
+
+
+DETAIL_OPDS = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dcterms="http://purl.org/dc/terms/">
+  <entry>
+    <id>urn:gutenberg:11:2</id>
+    <title>Alice's Adventures in Wonderland</title>
+    <content type="xhtml">
+      <div xmlns="http://www.w3.org/1999/xhtml">
+        <p>This edition had all images removed.</p>
+        <p>Summary: Alice follows a white rabbit.</p>
+      </div>
+    </content>
+    <contributor><name>Carroll, Lewis</name></contributor>
     <dcterms:language>en</dcterms:language>
     <rights>Public domain in the USA.</rights>
-    <summary>Alice follows a white rabbit.</summary>
-    <link rel="alternate" type="text/html" href="/ebooks/11" />
     <link rel="http://opds-spec.org/acquisition" type="application/epub+zip"
-          title="EPUB (with images)" length="12345" href="/ebooks/11.epub.images" />
+          title="EPUB (no images, older E-readers)" length="10000"
+          href="/ebooks/11.epub.noimages" />
+  </entry>
+  <entry>
+    <id>urn:gutenberg:11:3</id>
+    <title>Alice's Adventures in Wonderland</title>
+    <contributor><name>Carroll, Lewis</name></contributor>
+    <dcterms:language>en</dcterms:language>
+    <rights>Public domain in the USA.</rights>
+    <link rel="http://opds-spec.org/acquisition" type="application/epub+zip"
+          title="EPUB3 (E-readers incl. Send-to-Kindle)" length="12345"
+          href="/ebooks/11.epub3.images" />
+    <link rel="http://opds-spec.org/acquisition" type="application/epub+zip"
+          title="EPUB (older E-readers)" length="12000" href="/ebooks/11.epub.images" />
   </entry>
 </feed>
 """
@@ -59,16 +89,42 @@ def _epub_bytes() -> bytes:
     return output.getvalue()
 
 
-def test_parse_gutenberg_opds_extracts_metadata_acquisition_and_manual_next_page():
-    page = parse_gutenberg_opds(OPDS, base_url="https://www.gutenberg.org/ebooks/search.opds/?query=alice")
+def test_parse_search_opds_retains_detail_link_and_manual_next_page_without_claiming_unavailable():
+    page = parse_gutenberg_opds(
+        SEARCH_OPDS,
+        base_url="https://www.gutenberg.org/ebooks/search.opds/?query=alice",
+    )
+
+    assert len(page.books) == 1
+    book = page.books[0]
+    assert book.gutenberg_id == "11"
+    assert book.author_text == "Unknown"
+    assert book.language == "unknown"
+    assert book.summary == "12345 downloads"
+    assert book.preferred_epub is None
+    assert book.details_loaded is False
+    assert book.details_url == "https://www.gutenberg.org/ebooks/11.opds"
+    assert page.next_url == "https://www.gutenberg.org/ebooks/search.opds/?query=alice&start_index=26"
+
+
+def test_parse_detail_opds_merges_editions_contributors_and_acquisitions():
+    page = parse_gutenberg_opds(
+        DETAIL_OPDS,
+        base_url="https://www.gutenberg.org/ebooks/11.opds",
+    )
 
     assert len(page.books) == 1
     book = page.books[0]
     assert book.gutenberg_id == "11"
     assert book.author_text == "Carroll, Lewis"
+    assert book.language == "en"
+    assert book.rights == "Public domain in the USA."
+    assert book.summary == "Alice follows a white rabbit."
+    assert book.details_loaded is True
+    assert len(book.acquisitions) == 3
     assert book.preferred_epub is not None
+    assert book.preferred_epub.title == "EPUB3 (E-readers incl. Send-to-Kindle)"
     assert book.preferred_epub.length == 12345
-    assert page.next_url == "https://www.gutenberg.org/ebooks/search.opds/?query=alice&start_index=26"
 
 
 def test_client_search_uses_contact_user_agent_and_caches_identical_page():
@@ -76,7 +132,7 @@ def test_client_search_uses_contact_user_agent_and_caches_identical_page():
 
     def opener(request, **_kwargs):
         requests.append(request)
-        return FakeResponse(OPDS, request.full_url)
+        return FakeResponse(SEARCH_OPDS, request.full_url)
 
     client = GutenbergCatalogClient(opener=opener, minimum_request_interval=0)
     first = client.search("alice")
@@ -88,8 +144,27 @@ def test_client_search_uses_contact_user_agent_and_caches_identical_page():
     assert "query=alice" in requests[0].full_url
 
 
+def test_client_loads_only_selected_book_details_and_caches_detail_feed():
+    requests = []
+
+    def opener(request, **_kwargs):
+        requests.append(request)
+        payload = DETAIL_OPDS if request.full_url.endswith("/ebooks/11.opds") else SEARCH_OPDS
+        return FakeResponse(payload, request.full_url)
+
+    client = GutenbergCatalogClient(opener=opener, minimum_request_interval=0)
+    result = client.search("alice").books[0]
+    detailed = client.load_book_details(result)
+    repeated = client.load_book_details(result)
+
+    assert len(requests) == 2
+    assert requests[1].full_url == "https://www.gutenberg.org/ebooks/11.opds"
+    assert detailed.preferred_epub is not None
+    assert repeated.acquisitions == detailed.acquisitions
+
+
 def test_download_epub_is_validated_written_atomically_and_records_provenance(tmp_path):
-    page = parse_gutenberg_opds(OPDS, base_url="https://www.gutenberg.org/ebooks/search.opds/?query=alice")
+    page = parse_gutenberg_opds(DETAIL_OPDS, base_url="https://www.gutenberg.org/ebooks/11.opds")
     book = page.books[0]
     acquisition = book.preferred_epub
     assert acquisition is not None
@@ -110,12 +185,30 @@ def test_download_epub_is_validated_written_atomically_and_records_provenance(tm
 
 
 def test_catalog_rejects_non_gutenberg_pagination_or_acquisition_urls():
-    unsafe = OPDS.replace(
+    unsafe = SEARCH_OPDS.replace(
         b'/ebooks/search.opds/?query=alice&amp;start_index=26',
         b'https://example.com/next',
     )
 
     with pytest.raises(GutenbergCatalogError, match="unsupported"):
+        parse_gutenberg_opds(unsafe, base_url="https://www.gutenberg.org/ebooks/search.opds/?query=alice")
+
+    unsafe = DETAIL_OPDS.replace(
+        b'/ebooks/11.epub3.images',
+        b'https://example.com/11.epub3.images',
+    )
+
+    with pytest.raises(GutenbergCatalogError, match="unsupported"):
+        parse_gutenberg_opds(unsafe, base_url="https://www.gutenberg.org/ebooks/11.opds")
+
+
+def test_catalog_rejects_unexpected_book_detail_url():
+    unsafe = SEARCH_OPDS.replace(
+        b'href="/ebooks/11.opds"',
+        b'href="/ebooks/12.opds"',
+    )
+
+    with pytest.raises(GutenbergCatalogError, match="book-detail"):
         parse_gutenberg_opds(unsafe, base_url="https://www.gutenberg.org/ebooks/search.opds/?query=alice")
 
 
@@ -127,7 +220,7 @@ def test_catalog_rejects_xml_entities_before_parsing():
 
 
 def test_download_rejects_non_epub_payload_without_leaving_a_partial_file(tmp_path):
-    page = parse_gutenberg_opds(OPDS, base_url="https://www.gutenberg.org/ebooks/search.opds/?query=alice")
+    page = parse_gutenberg_opds(DETAIL_OPDS, base_url="https://www.gutenberg.org/ebooks/11.opds")
     book = page.books[0]
     acquisition = book.preferred_epub
     assert acquisition is not None

@@ -135,6 +135,14 @@ def test_gui_requires_confirmation_before_a_specific_gutenberg_download():
     assert "self.client.download_epub(self.book, acquisition, self.books_dir)" in source
 
 
+def test_gui_loads_only_selected_gutenberg_details_before_review():
+    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+
+    assert "self.client.load_book_details(self.book)" in source
+    assert 'return "Unavailable" if book.details_loaded else "Select to review"' in source
+    assert 'QPushButton("Review & download selected EPUB…")' in source
+
+
 def test_generated_and_downloaded_work_directories_keep_only_safe_placeholders_trackable():
     ignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
 

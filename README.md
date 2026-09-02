@@ -72,7 +72,8 @@ overwriting or displacing another title's state. Existing incomplete checkpoints
 old global `audiobook_output` directory remain discoverable and resumable.
 
 The **Find books** tab searches Project Gutenberg only when **Search** is pressed. It requests one OPDS
-result page at a time and downloads only the exact EPUB confirmed by the user. See
+result page at a time. Reviewing a result loads only that title's detail feed, and only explicit confirmation
+downloads its selected EPUB. See
 [Library jobs and Project Gutenberg acquisition](Docs/library-and-gutenberg.md).
 
 Preset speakers are the stable default for long-form work. VoiceDesign remains experimental because independent generations may vary even with the same instruction and seed.

@@ -169,6 +169,21 @@ def launch_gui(project_root: Path) -> int:
             except Exception as exc:  # noqa: BLE001 - worker failures must always release the UI thread.
                 self.failed.emit(str(exc))
 
+    class CatalogDetailsWorker(QObject):
+        finished = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, client: GutenbergCatalogClient, book: GutenbergBook):
+            super().__init__()
+            self.client = client
+            self.book = book
+
+        def run(self) -> None:
+            try:
+                self.finished.emit(self.client.load_book_details(self.book))
+            except Exception as exc:  # noqa: BLE001 - worker failures must always release the UI thread.
+                self.failed.emit(str(exc))
+
     class CatalogDownloadWorker(QObject):
         finished = Signal(str)
         failed = Signal(str)
@@ -211,7 +226,7 @@ def launch_gui(project_root: Path) -> int:
             self.worker_thread: QThread | None = None
             self.worker: PipelineWorker | None = None
             self.catalog_thread: QThread | None = None
-            self.catalog_worker: CatalogSearchWorker | CatalogDownloadWorker | None = None
+            self.catalog_worker: CatalogSearchWorker | CatalogDetailsWorker | CatalogDownloadWorker | None = None
             self.library_books: dict[str, LibraryBook] = {}
             self.library_items: dict[str, QTreeWidgetItem] = {}
             self.library_progress_bars: dict[str, QProgressBar] = {}
@@ -220,8 +235,10 @@ def launch_gui(project_root: Path) -> int:
             self.queued_jobs: list[tuple[str, argparse.Namespace]] = []
             self.active_progress_percent = 0
             self._catalog_books: dict[str, GutenbergBook] = {}
+            self._catalog_items: dict[str, QTreeWidgetItem] = {}
             self._catalog_next_url: str | None = None
             self._catalog_append_results = False
+            self._pending_catalog_confirmation_id: str | None = None
             self._closing_after_pause = False
             self.resume_available = False
 
@@ -325,7 +342,8 @@ def launch_gui(project_root: Path) -> int:
             layout.addLayout(search_row)
 
             notice = QLabel(
-                "Search uses Project Gutenberg's OPDS catalog. Downloads occur only after confirmation. "
+                "Search uses Project Gutenberg's OPDS catalog. Details are loaded only for the selected "
+                "title, and downloads occur only after confirmation. "
                 "Project Gutenberg generally describes status under United States law; users outside the "
                 "United States must check their local copyright law."
             )
@@ -344,7 +362,7 @@ def launch_gui(project_root: Path) -> int:
             self.catalog_next_button = QPushButton("More results")
             self.catalog_next_button.setEnabled(False)
             self.catalog_next_button.clicked.connect(self._load_next_gutenberg_page)
-            self.catalog_download_button = QPushButton("Download selected EPUB…")
+            self.catalog_download_button = QPushButton("Review & download selected EPUB…")
             self.catalog_download_button.setEnabled(False)
             self.catalog_download_button.clicked.connect(self._download_selected_gutenberg)
             controls.addWidget(self.catalog_next_button)
@@ -656,6 +674,7 @@ def launch_gui(project_root: Path) -> int:
             self._catalog_append_results = page_url is not None
             self.catalog_search_button.setEnabled(False)
             self.catalog_next_button.setEnabled(False)
+            self.catalog_download_button.setEnabled(False)
             self.catalog_status.setText("Searching Project Gutenberg…")
             self.catalog_thread = QThread(self)
             self.catalog_worker = CatalogSearchWorker(self.catalog_client, query, page_url)
@@ -676,14 +695,19 @@ def launch_gui(project_root: Path) -> int:
             if not self._catalog_append_results:
                 self.catalog_tree.clear()
                 self._catalog_books.clear()
+                self._catalog_items.clear()
             for book in page.books:
+                existing = self._catalog_books.get(book.gutenberg_id)
+                if existing is not None and existing.details_loaded and not book.details_loaded:
+                    book = existing
                 self._catalog_books[book.gutenberg_id] = book
-                acquisition = book.preferred_epub
-                format_text = acquisition.title if acquisition else "Unavailable"
-                item = QTreeWidgetItem((book.title, book.author_text, book.language, format_text))
-                item.setData(0, Qt.ItemDataRole.UserRole, book.gutenberg_id)
-                item.setToolTip(0, book.summary or book.landing_url)
-                self.catalog_tree.addTopLevelItem(item)
+                item = self._catalog_items.get(book.gutenberg_id)
+                if item is None:
+                    item = QTreeWidgetItem()
+                    item.setData(0, Qt.ItemDataRole.UserRole, book.gutenberg_id)
+                    self.catalog_tree.addTopLevelItem(item)
+                    self._catalog_items[book.gutenberg_id] = item
+                self._update_catalog_item(item, book)
             self._catalog_next_url = page.next_url
             self.catalog_next_button.setEnabled(page.next_url is not None)
             self.catalog_status.setText(
@@ -700,6 +724,25 @@ def launch_gui(project_root: Path) -> int:
             self.catalog_worker = None
             self.catalog_search_button.setEnabled(True)
             self.catalog_next_button.setEnabled(self._catalog_next_url is not None)
+            self._on_catalog_selection_changed()
+            pending_id = self._pending_catalog_confirmation_id
+            self._pending_catalog_confirmation_id = None
+            if pending_id is not None:
+                QTimer.singleShot(0, lambda: self._review_resolved_gutenberg_book(pending_id))
+
+        @staticmethod
+        def _catalog_format_text(book: GutenbergBook) -> str:
+            acquisition = book.preferred_epub
+            if acquisition is not None:
+                return acquisition.title
+            return "Unavailable" if book.details_loaded else "Select to review"
+
+        def _update_catalog_item(self, item: QTreeWidgetItem, book: GutenbergBook) -> None:
+            for column, value in enumerate(
+                (book.title, book.author_text, book.language, self._catalog_format_text(book))
+            ):
+                item.setText(column, value)
+            item.setToolTip(0, book.summary or book.landing_url)
 
         def _on_catalog_selection_changed(self) -> None:
             selected = self.catalog_tree.selectedItems()
@@ -708,7 +751,11 @@ def launch_gui(project_root: Path) -> int:
                 return
             gutenberg_id = str(selected[0].data(0, Qt.ItemDataRole.UserRole))
             book = self._catalog_books.get(gutenberg_id)
-            self.catalog_download_button.setEnabled(book is not None and book.preferred_epub is not None)
+            can_review = book is not None and (
+                book.preferred_epub is not None
+                or (not book.details_loaded and book.details_url is not None)
+            )
+            self.catalog_download_button.setEnabled(can_review)
 
         @staticmethod
         def _format_download_size(length: int | None) -> str:
@@ -726,9 +773,57 @@ def launch_gui(project_root: Path) -> int:
                 return
             gutenberg_id = str(selected[0].data(0, Qt.ItemDataRole.UserRole))
             book = self._catalog_books.get(gutenberg_id)
-            if book is None or book.preferred_epub is None:
+            if book is None:
                 return
+            if not book.details_loaded:
+                self.catalog_download_button.setEnabled(False)
+                self.catalog_search_button.setEnabled(False)
+                self.catalog_next_button.setEnabled(False)
+                self.catalog_status.setText(f"Loading details for {book.title}…")
+                self.catalog_thread = QThread(self)
+                self.catalog_worker = CatalogDetailsWorker(self.catalog_client, book)
+                self.catalog_worker.moveToThread(self.catalog_thread)
+                self.catalog_thread.started.connect(self.catalog_worker.run)
+                self.catalog_worker.finished.connect(self._on_gutenberg_details)
+                self.catalog_worker.failed.connect(self._on_gutenberg_details_error)
+                self.catalog_worker.finished.connect(lambda *_: self.catalog_thread.quit())
+                self.catalog_worker.failed.connect(lambda *_: self.catalog_thread.quit())
+                self.catalog_thread.finished.connect(self._catalog_thread_stopped)
+                self.catalog_thread.start()
+                return
+            self._confirm_gutenberg_download(book)
+
+        def _on_gutenberg_details(self, book: GutenbergBook) -> None:
+            self._catalog_books[book.gutenberg_id] = book
+            item = self._catalog_items.get(book.gutenberg_id)
+            if item is not None:
+                self._update_catalog_item(item, book)
+            self.catalog_status.setText(f"Loaded details for {book.title}.")
+            self._pending_catalog_confirmation_id = book.gutenberg_id
+
+        def _on_gutenberg_details_error(self, message: str) -> None:
+            self.catalog_status.setText(f"Could not load book details: {message}")
+            QMessageBox.warning(self, "Project Gutenberg", message)
+
+        def _review_resolved_gutenberg_book(self, gutenberg_id: str) -> None:
+            book = self._catalog_books.get(gutenberg_id)
+            if book is None:
+                return
+            if book.preferred_epub is None:
+                self.catalog_status.setText(f"No EPUB is available for {book.title}.")
+                QMessageBox.information(
+                    self,
+                    "Project Gutenberg",
+                    "The selected catalog entry does not offer an EPUB download.",
+                )
+                self._on_catalog_selection_changed()
+                return
+            self._confirm_gutenberg_download(book)
+
+        def _confirm_gutenberg_download(self, book: GutenbergBook) -> None:
             acquisition = book.preferred_epub
+            if acquisition is None:
+                return
             confirmation = QMessageBox(self)
             confirmation.setIcon(QMessageBox.Icon.Question)
             confirmation.setWindowTitle("Confirm Project Gutenberg download")

@@ -41,7 +41,9 @@ The client follows these boundaries:
 
 - a search request occurs only when the user presses **Search** or Enter;
 - only one result page is requested, with **More results** providing explicit pagination;
-- no covers, related titles, speculative pages, or book files are prefetched;
+- search results remain lightweight; **Review & download selected EPUB…** requests the selected title's
+  OPDS detail feed so its contributors, language, rights, and acquisition formats can be shown;
+- no covers, related titles, unselected detail pages, speculative pages, or book files are prefetched;
 - repeated identical result pages are cached for the current application session;
 - requests are rate-limited and use `AutoAudio/<version>` with the project repository as a contact URL;
 - OPDS and acquisition responses have strict size limits;
@@ -62,9 +64,11 @@ References:
 
 ## Explicit acquisition
 
-Selecting a result does not download it. **Download selected EPUB…** opens a confirmation containing the
-specific title, author, language, format, reported size, and catalog rights statement. The default answer is
-No. Only acceptance starts the request.
+Selecting a result does not make another request or download it. **Review & download selected EPUB…** loads
+only that title's OPDS detail feed, merges its available editions, and then opens a confirmation containing
+the specific title, contributors, language, preferred EPUB format, reported size, and catalog rights
+statement. The default answer is No. Only acceptance starts the EPUB request. EPUB3 with images is preferred
+when offered, followed by other image-bearing EPUBs and then compatible fallbacks.
 
 The installed filename is `pg<gutenberg-id>.epub`. A neighboring
 `pg<id>.epub.autoaudio-source.json` record preserves the canonical landing page, acquisition URL, retrieved
