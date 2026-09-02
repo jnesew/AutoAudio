@@ -25,7 +25,7 @@ The narrator dropdown contains a neutral long-form profile for every built-in Cu
 | `preset-uncle-fu-neutral` | Uncle Fu — Low | `Uncle_fu` |
 | `preset-vivian-neutral` | Vivian — Bright | `Vivian` |
 
-`preset-eric-neutral` remains the default. Profiles live in `resources/narrators/default_profiles.json` and lock the complete generation configuration used for checkpoint compatibility.
+`preset-eric-neutral` remains the default. Profiles are packaged in `default_profiles.json` and lock the complete generation configuration used for checkpoint compatibility.
 
 ## Designed voice profile
 

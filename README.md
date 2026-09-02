@@ -7,7 +7,7 @@ Version 2 is deliberately non-cloning: it supports Qwen built-in preset speakers
 The current release candidate identifies itself as `2.0.0.dev0`:
 
 ```bash
-python auto_audiobook.py --version
+autoaudio --version
 ```
 
 ## Features
@@ -37,13 +37,13 @@ See [Installation and ComfyUI setup](Docs/installation.md) for the full setup co
 Install Python dependencies:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install .
 ```
 
 Start ComfyUI, then run a book from the command line:
 
 ```bash
-python auto_audiobook.py \
+autoaudio \
   --input-book /path/to/book.epub \
   --output-dir /path/to/audiobook
 ```
@@ -51,7 +51,7 @@ python auto_audiobook.py \
 Choose another narrator and output format:
 
 ```bash
-python auto_audiobook.py \
+autoaudio \
   --input-book /path/to/book.epub \
   --output-dir /path/to/audiobook \
   --narrator-profile preset-aiden-neutral \
@@ -61,7 +61,7 @@ python auto_audiobook.py \
 Launch the desktop GUI:
 
 ```bash
-python auto_audiobook.py --gui
+autoaudio --gui
 ```
 
 Preset speakers are the stable default for long-form work. VoiceDesign remains experimental because independent generations may vary even with the same instruction and seed.
@@ -73,7 +73,7 @@ Use **Cancel** in the GUI or press `Ctrl+C` in the CLI. AutoAudio requests cance
 Resume with the same input, settings, workflows, plan, and output directory:
 
 ```bash
-python auto_audiobook.py \
+autoaudio \
   --input-book /path/to/book.epub \
   --output-dir /path/to/audiobook \
   --resume yes
@@ -94,7 +94,7 @@ Internal lossless masters, silence assets, and temporary segments are maintained
 After a completed run, verify retained chapter and part files:
 
 ```bash
-python scripts/verify.py --output-dir "/path/to/audiobook"
+autoaudio-verify --output-dir "/path/to/audiobook"
 ```
 
 The command fails if a publishable artifact has missing AI metadata, missing or incompatible watermark evidence, or a stale final-file hash.

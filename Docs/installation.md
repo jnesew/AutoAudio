@@ -8,10 +8,18 @@ AutoAudio v2 requires Python 3.11 or newer. A virtual environment is recommended
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install .
 ```
 
-`requirements.txt` pins `pubparser` v0.1.1 to an immutable commit. The remaining direct dependencies are compatibility ranges until the v2 release environment is locked and recorded.
+For development, use an editable install:
+
+```bash
+python -m pip install -e .
+```
+
+`pyproject.toml` is the install and packaging contract. `requirements.txt` mirrors its direct runtime dependencies for compatibility and is not the final transitive lock. Both pin `pubparser` v0.1.1 to an immutable commit and AudioSeal to the tested 0.2 API.
+
+PyTorch accelerator wheels are platform-specific. Install the appropriate tested CPU, CUDA, or ROCm wheel first when the default PyPI resolution is not suitable; `python -m pip install .` will accept an already installed compatible `torch` distribution. Intel XPU is not part of the v2 qualification matrix.
 
 PySide6 is required only for the desktop GUI. AudioSeal, PyTorch, librosa, SoundFile, and NumPy provide non-audible watermark embedding and verification.
 
@@ -30,10 +38,10 @@ The server must provide these non-cloning node classes:
 - `FB_Qwen3TTSCustomVoice`
 - `FB_Qwen3TTSVoiceDesign`
 
-AutoAudio bundles compatible workflow templates:
+AutoAudio packages compatible workflow templates:
 
-- `resources/workflows/qwen3_tts_custom_voice.json`
-- `resources/workflows/qwen3_tts_voice_design.json`
+- `qwen3_tts_custom_voice.json`
+- `qwen3_tts_voice_design.json`
 
 Preset narration supports the Qwen 0.6B and 1.7B CustomVoice models. VoiceDesign requires the 1.7B VoiceDesign model. Model files and ComfyUI itself are external runtime components and are not distributed by AutoAudio.
 
@@ -44,7 +52,7 @@ AutoAudio validates workflows before submission and rejects voice-cloning nodes 
 Start ComfyUI before AutoAudio. The normal runtime mode is `network`:
 
 ```bash
-python auto_audiobook.py \
+autoaudio \
   --input-book /path/to/book.epub \
   --output-dir /path/to/output \
   --comfyui-mode network \
@@ -54,7 +62,7 @@ python auto_audiobook.py \
 `spoof` mode exercises orchestration without a live model and is intended for tests and development:
 
 ```bash
-python auto_audiobook.py \
+autoaudio \
   --input-book /path/to/short-test.txt \
   --output-dir /path/to/test-output \
   --comfyui-mode spoof

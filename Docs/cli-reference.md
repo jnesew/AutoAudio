@@ -3,8 +3,10 @@
 The authoritative option list is always available from:
 
 ```bash
-python auto_audiobook.py --help
+autoaudio --help
 ```
+
+Source checkouts may equivalently use `python auto_audiobook.py`.
 
 ## Input and book planning
 

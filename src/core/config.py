@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Literal
 
@@ -44,7 +45,16 @@ class AppConfig:
     provenance: ProvenanceConfig = field(default_factory=ProvenanceConfig)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "resource_dir", self.project_root / "resources")
+        source_resource_dir = self.project_root / "resources"
+        if source_resource_dir.is_dir():
+            resource_dir = source_resource_dir
+        else:
+            try:
+                resource_dir = Path(str(files("autoaudio_resources")))
+            except ModuleNotFoundError:
+                # Preserve a useful path in minimal source-only test contexts.
+                resource_dir = source_resource_dir
+        object.__setattr__(self, "resource_dir", resource_dir)
         object.__setattr__(self, "workflows_dir", self.resource_dir / "workflows")
 
     @property
