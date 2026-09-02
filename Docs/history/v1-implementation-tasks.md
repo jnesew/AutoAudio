@@ -1,3 +1,7 @@
+# Legacy v1 implementation tasks
+
+> Historical document: these tasks describe the completed VibeVoice-era implementation. For the active release record, see [../v2-migration-plan.md](../v2-migration-plan.md).
+
 Sprint 1 — Foundation Refactor (S/M)
 
     [M] Create package structure + shared pipeline module

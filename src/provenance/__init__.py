@@ -7,6 +7,7 @@ from provenance.c2pa import (
     apply_c2pa_provenance,
     apply_c2pa_with_policy,
     embedding_path_for_artifact,
+    media_type_for_artifact,
     parse_model_identity_version,
     validate_assertions,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "apply_c2pa_provenance",
     "apply_c2pa_with_policy",
     "embedding_path_for_artifact",
+    "media_type_for_artifact",
     "parse_model_identity_version",
     "validate_assertions",
 ]

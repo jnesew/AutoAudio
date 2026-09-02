@@ -39,7 +39,7 @@ class MetadataExtractionError(AutoAudioError):
 class ResumeStateError(AutoAudioError):
     guidance = ErrorGuidance(
         code="RESUME_STATE_ERROR",
-        remediation="Run with --resume no, or clear resources/.autoaudio_state/checkpoint_state.json.",
+        remediation="Run with --resume no, or clear .autoaudio_state in the selected output directory.",
         exit_code=4,
     )
 
@@ -73,6 +73,14 @@ class PipelineRuntimeError(AutoAudioError):
         code="PIPELINE_RUNTIME_ERROR",
         remediation="Inspect the run log and retry with smaller chunks or --comfyui-mode spoof.",
         exit_code=8,
+    )
+
+
+class PipelineCancelled(AutoAudioError):
+    guidance = ErrorGuidance(
+        code="PIPELINE_CANCELLED",
+        remediation="Resume the checkpointed run when ready.",
+        exit_code=130,
     )
 
 

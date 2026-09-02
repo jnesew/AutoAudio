@@ -1,5 +1,8 @@
-beautifulsoup4>=4.12
-EbookLib>=0.18
+# pubparser v0.1.1; immutable tag target pinned for reproducible installs.
+pubparser @ git+https://github.com/jnesew/pubparser.git@60bfedfe8d9d716a22016a0fe63e7b015f50ba1d
+# Direct requirements use compatibility ranges unless an integration targets a
+# specific upstream API. This file is not the complete release lock.
+# Stage 10 release qualification must capture the tested, platform-specific resolution.
 websocket-client>=1.8
 
 PySide6>=6.7
@@ -8,4 +11,5 @@ numpy
 torch
 librosa
 soundfile
-audioseal
+# AutoAudio uses the 0.2 no-internal-resampling API and its published checkpoints.
+audioseal==0.2.0

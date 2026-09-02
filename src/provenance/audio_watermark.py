@@ -6,8 +6,17 @@ import io
 import logging
 import os
 import subprocess
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
+
+
+_AUDIOSEAL_JIT_WARNING = r"`torch\.jit\.script` is not supported in Python 3\.14\+"
+_AUDIOSEAL_WEIGHT_NORM_WARNING = r"`torch\.nn\.utils\.weight_norm` is deprecated"
+
+
+class AudioSealCompatibilityError(RuntimeError):
+    """Raised when the installed AudioSeal API cannot embed the required message."""
 
 
 def _derive_16bit_message(secret_key: str, content_id: str, source_sha256: str):
@@ -21,17 +30,57 @@ def _derive_16bit_message(secret_key: str, content_id: str, source_sha256: str):
 
 @lru_cache(maxsize=2)
 def _load_audioseal_models(device: str):
-    from audioseal import AudioSeal
+    # AudioSeal 0.2.0 imports TorchScript-decorated streaming helpers and uses
+    # the legacy weight_norm API while translating its published checkpoints.
+    # Both paths still work for eager inference, but PyTorch emits warnings on
+    # Python 3.14. Keep the suppression limited to AudioSeal import/model load
+    # so unrelated FutureWarnings remain visible.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_AUDIOSEAL_JIT_WARNING,
+            category=FutureWarning,
+            module=r"torch\.jit\._script",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=_AUDIOSEAL_WEIGHT_NORM_WARNING,
+            category=FutureWarning,
+            module=r"torch\.nn\.utils\.weight_norm",
+        )
 
-    generator = AudioSeal.load_generator("audioseal_wm_16bits")
-    detector = AudioSeal.load_detector("audioseal_detector_16bits")
+        from audioseal import AudioSeal
+
+        generator = AudioSeal.load_generator("audioseal_wm_16bits")
+        detector = AudioSeal.load_detector("audioseal_detector_16bits")
     for model in (generator, detector):
-        try:
-            model.to(device)
-        except Exception:
-            pass
+        model.to(device)
         model.eval()
     return generator, detector
+
+
+def resolve_audioseal_device(requested: str) -> str:
+    """Resolve an AudioSeal device selection without silently overriding explicit choices."""
+    import torch
+
+    normalized = requested.strip().lower()
+    if normalized not in {"auto", "cpu", "cuda"}:
+        raise ValueError("AudioSeal device must be one of: auto, cpu, cuda.")
+    if normalized == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if normalized == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("AudioSeal device 'cuda' was requested, but PyTorch reports no CUDA/ROCm device.")
+    return normalized
+
+
+def _watermark_with_message(generator, wav, message):
+    """Call the pinned AudioSeal 0.2 API while always supplying the identifying payload."""
+    try:
+        return generator.get_watermark(wav, message=message)
+    except TypeError as error:
+        raise AudioSealCompatibilityError(
+            "Installed AudioSeal generator does not support the required 0.2 message API."
+        ) from error
 
 
 def _as_float(x) -> float:
@@ -67,7 +116,7 @@ def watermark_audio_bytes(
     import torch
 
     source_sha256 = hashlib.sha256(audio_data).hexdigest()
-    msg = _derive_16bit_message(secret_key, content_id, source_sha256)
+    msg = _derive_16bit_message(secret_key, content_id, source_sha256).to(device)
     generator, detector = _load_audioseal_models(device)
 
     decode_proc = subprocess.run(
@@ -83,13 +132,7 @@ def watermark_audio_bytes(
     wav = torch.from_numpy(wav_np).float().unsqueeze(0).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        try:
-            watermark = generator.get_watermark(wav, sr, message=msg)
-        except TypeError:
-            try:
-                watermark = generator.get_watermark(wav, sample_rate=sr, message=msg)
-            except TypeError:
-                watermark = generator.get_watermark(wav, sr)
+        watermark = _watermark_with_message(generator, wav, msg)
         watermarked = torch.clamp(wav + watermark, -1.0, 1.0)
 
     out_io = io.BytesIO()
@@ -97,13 +140,10 @@ def watermark_audio_bytes(
     watermarked_wav_bytes = out_io.getvalue()
 
     if verify:
-        verify_np, verify_sr = librosa.load(io.BytesIO(watermarked_wav_bytes), sr=24000, mono=True)
+        verify_np, _ = librosa.load(io.BytesIO(watermarked_wav_bytes), sr=24000, mono=True)
         verify_tensor = torch.from_numpy(verify_np).float().unsqueeze(0).unsqueeze(0).to(device)
         with torch.no_grad():
-            try:
-                prob, detected_msg = detector.detect_watermark(verify_tensor, verify_sr)
-            except TypeError:
-                prob, detected_msg = detector.detect_watermark(verify_tensor)
+            prob, detected_msg = detector.detect_watermark(verify_tensor)
 
         if _as_float(prob) < verify_threshold:
             raise RuntimeError("AudioSeal verification failed: detector confidence below threshold.")
@@ -119,24 +159,59 @@ def watermark_audio_bytes_best_effort(
     audio_data: bytes,
     *,
     content_id: str,
+    device: str = "auto",
     logger: logging.Logger | None = None,
 ) -> tuple[WatermarkResult, bytes]:
-    """Best-effort wrapper so pipeline output remains available if watermarking deps/tools are missing."""
+    """Return watermark evidence and bytes; strict callers reject a failed result."""
     log = logger or logging.getLogger("autoaudio.run")
     secret_key = os.environ.get("AUTOAUDIO_WATERMARK_SECRET", "default_public_autoaudio_key_123").strip()
-
-    device = os.environ.get("AUTOAUDIO_WATERMARK_DEVICE", "cpu")
+    requested_device = os.environ.get("AUTOAUDIO_WATERMARK_DEVICE", device).strip().lower()
+    resolved_device: str | None = None
     try:
+        resolved_device = resolve_audioseal_device(requested_device)
+        log.info("AudioSeal device requested=%s resolved=%s", requested_device, resolved_device)
         out_bytes = watermark_audio_bytes(
             audio_data,
             content_id=content_id,
             secret_key=secret_key,
-            device=device,
+            device=resolved_device,
             verify=True,
             verify_threshold=0.5,
         )
-        return WatermarkResult(applied=True, verified=True, method="audioseal", detail="ok"), out_bytes
-    except Exception as exc:
+        detail = f"verified; requested={requested_device}; device={resolved_device}"
+        return WatermarkResult(applied=True, verified=True, method="audioseal", detail=detail), out_bytes
+    except AudioSealCompatibilityError as exc:
         log.warning("Audio watermarking skipped for %s (%s)", content_id, exc)
         return WatermarkResult(applied=False, verified=False, method="audioseal", detail=str(exc)), audio_data
+    except Exception as exc:
+        if requested_device == "auto" and resolved_device == "cuda":
+            log.warning(
+                "AudioSeal automatic CUDA/ROCm execution failed for %s (%s); retrying on CPU",
+                content_id,
+                exc,
+            )
+            _load_audioseal_models.cache_clear()
+            try:
+                import torch
 
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
+                out_bytes = watermark_audio_bytes(
+                    audio_data,
+                    content_id=content_id,
+                    secret_key=secret_key,
+                    device="cpu",
+                    verify=True,
+                    verify_threshold=0.5,
+                )
+                detail = "verified; requested=auto; device=cpu; fallback_from=cuda"
+                return WatermarkResult(applied=True, verified=True, method="audioseal", detail=detail), out_bytes
+            except Exception as cpu_exc:
+                detail = f"automatic CUDA/ROCm attempt failed ({exc}); CPU retry failed ({cpu_exc})"
+                log.warning("Audio watermarking skipped for %s (%s)", content_id, detail)
+                return WatermarkResult(applied=False, verified=False, method="audioseal", detail=detail), audio_data
+
+        log.warning("Audio watermarking skipped for %s (%s)", content_id, exc)
+        return WatermarkResult(applied=False, verified=False, method="audioseal", detail=str(exc)), audio_data

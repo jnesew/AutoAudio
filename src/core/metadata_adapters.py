@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from provenance.ai_marking import AI_MARKING_COMMENT
+
 
 @dataclass(frozen=True)
 class MetadataContext:
@@ -57,7 +59,10 @@ class M4bMetadataAdapter(MetadataAdapter):
     def ffmpeg_metadata_args(self, context: MetadataContext) -> list[str]:
         # MP4 atom names accepted by ffmpeg are still title/artist/album.
         args = FlacMetadataAdapter().ffmpeg_metadata_args(context)
-        args.extend(["-movflags", "use_metadata_tags"])
+        # FFmpeg's use_metadata_tags mode drops MP4/M4B cover artwork. Store
+        # the same machine-verifiable AI disclosure in the standard comment
+        # atom so arbitrary mdta keys are not required.
+        args.extend(["-metadata", f"comment={AI_MARKING_COMMENT}"])
         return args
 
 

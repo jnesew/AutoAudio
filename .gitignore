@@ -8,3 +8,8 @@ env.bak/
 venv.bak/
 __pycache__/
 *.pyc
+build/
+dist/
+*.egg-info/
+audiobook_output/
+books/

@@ -1,3 +1,7 @@
+# Legacy v1 architecture plan
+
+> Historical document: this plan describes the completed VibeVoice-era implementation. For the active release record, see [../v2-migration-plan.md](../v2-migration-plan.md).
+
 Architecture Plan
 1) Project Structure Refactor
 

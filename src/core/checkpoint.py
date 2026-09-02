@@ -10,6 +10,21 @@ from pathlib import Path
 from typing import Any
 
 
+CHECKPOINT_SCHEMA_VERSION = 2
+
+
+class CheckpointError(ValueError):
+    """Raised when checkpoint state is unreadable or structurally unsafe."""
+
+
+class UnsupportedCheckpointVersion(CheckpointError):
+    def __init__(self, version: Any):
+        super().__init__(
+            f"Unsupported checkpoint schema version {version!r}; "
+            f"expected {CHECKPOINT_SCHEMA_VERSION}. Start a new run instead of resuming it."
+        )
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -46,8 +61,18 @@ class CheckpointStore:
     def load(self) -> dict[str, Any] | None:
         if not self.path.exists():
             return None
-        with open(self.path, "r", encoding="utf-8") as file:
-            return json.load(file)
+        try:
+            with open(self.path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CheckpointError(f"Could not read checkpoint at {self.path}: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise CheckpointError("Checkpoint root must be a JSON object.")
+        version = data.get("version")
+        if version != CHECKPOINT_SCHEMA_VERSION:
+            raise UnsupportedCheckpointVersion(version)
+        return data
 
     def save(self, data: dict[str, Any]) -> None:
         os.makedirs(self.state_dir, exist_ok=True)
@@ -67,13 +92,16 @@ def create_initial_checkpoint(
     input_path: str,
     input_hash: str,
     settings_hash: str,
+    workflow_hash: str,
+    plan_path: str,
+    plan_hash: str,
     output_dir: str,
     output_format: str,
     ui_state: dict[str, Any],
 ) -> dict[str, Any]:
     now = _utc_now()
     return {
-        "version": 1,
+        "version": CHECKPOINT_SCHEMA_VERSION,
         "status": "running",
         "created_at": now,
         "updated_at": now,
@@ -81,7 +109,15 @@ def create_initial_checkpoint(
             "path": input_path,
             "sha256": input_hash,
         },
-        "settings_hash": settings_hash,
+        "compatibility": {
+            "settings_sha256": settings_hash,
+            "workflow_sha256": workflow_hash,
+        },
+        "plan": {
+            "path": plan_path,
+            "sha256": plan_hash,
+            "schema_version": 1,
+        },
         "output": {
             "dir": output_dir,
             "format": output_format,
@@ -91,7 +127,11 @@ def create_initial_checkpoint(
             "completed_segments": {},
         },
         "artifacts": {
+            "disclosure": {},
+            "silence": {},
             "segments": {},
+            "chapter_masters": {},
+            "part_masters": {},
             "chapters": {},
             "parts": {},
             "provenance": {},

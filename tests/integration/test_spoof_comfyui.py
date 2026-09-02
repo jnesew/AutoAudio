@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import sys
 import unittest
+import wave
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -17,7 +19,7 @@ from core.config import GenerationSettings
 
 class SpoofComfyUIIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
-        workflow_path = PROJECT_ROOT / "resources" / "workflows" / "vibevoice_single_speaker.json"
+        workflow_path = PROJECT_ROOT / "resources" / "workflows" / "qwen3_tts_custom_voice.json"
         self.workflow_template = load_workflow_template(workflow_path)
         self.settings = GenerationSettings()
 
@@ -28,13 +30,26 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
         artifact = client.generate_audio(
             workflow_template=self.workflow_template,
             text_segment="Hello sprint two",
-            reference_voice="default_voice.wav",
             settings=self.settings,
             timeout_seconds=3,
         )
 
-        self.assertEqual(artifact.extension, ".flac")
+        self.assertEqual(artifact.extension, ".wav")
         self.assertEqual(artifact.content, b"FAKE-FLAC-BYTES")
+
+    def test_default_success_payload_is_valid_pcm_wav(self) -> None:
+        client = SpoofComfyUIClient()
+
+        artifact = client.generate_audio(
+            workflow_template=self.workflow_template,
+            text_segment="Valid deterministic spoof audio",
+            settings=self.settings,
+        )
+
+        with wave.open(io.BytesIO(artifact.content), "rb") as audio:
+            self.assertEqual(audio.getframerate(), 24_000)
+            self.assertEqual(audio.getnchannels(), 1)
+            self.assertGreater(audio.getnframes(), 0)
 
     def test_timeout_path_raises_timeout_error(self) -> None:
         client = SpoofComfyUIClient(scenario="timeout")
@@ -43,7 +58,6 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
             client.generate_audio(
                 workflow_template=self.workflow_template,
                 text_segment="should timeout",
-                reference_voice="default_voice.wav",
                 settings=self.settings,
                 timeout_seconds=1,
             )
@@ -55,7 +69,6 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
             client.generate_audio(
                 workflow_template=self.workflow_template,
                 text_segment="bad history",
-                reference_voice="default_voice.wav",
                 settings=self.settings,
                 timeout_seconds=1,
             )
@@ -67,7 +80,6 @@ class SpoofComfyUIIntegrationTests(unittest.TestCase):
             client.generate_audio(
                 workflow_template=self.workflow_template,
                 text_segment="cannot connect",
-                reference_voice="default_voice.wav",
                 settings=self.settings,
                 timeout_seconds=1,
             )
