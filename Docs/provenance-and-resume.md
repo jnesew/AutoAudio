@@ -61,6 +61,22 @@ A resume is compatible only when all of these still match:
 
 The parser policy, narrator profile content, output rules, and AI-marking schema contribute to the effective settings identity. This prevents a job from silently mixing artifacts produced under incompatible behavior.
 
+## Per-title library state
+
+The GUI identifies a local source by its SHA-256 digest and assigns it a deterministic directory named
+`book-<digest-prefix>` beneath the selected library output root. The existing BookPlan/checkpoint contract
+is unchanged inside that directory; isolation comes from giving every source its own output and state root.
+
+An incomplete checkpoint found directly beneath the selected output root is treated as a legacy global job.
+If its input digest matches a current library title, that title continues to use the original directory so
+it can resume without moving trusted artifacts or rewriting their recorded paths.
+
+Library progress is reconstructed from checkpointed disclosure, segment, chapter, master, and part artifact
+presence using the same BookPlan weighting model as an active run. It deliberately avoids re-hashing large
+completed audio files during every library rescan, so the GUI labels the value as an estimate. Resume still
+performs the full artifact hash and AI-marking validation before reuse. Active-run ETA remains session-local
+because it depends on observed generation throughput.
+
 ## Resume modes
 
 - `--resume auto`: resume a compatible v2 job; otherwise start a new one.
@@ -68,3 +84,6 @@ The parser policy, narrator profile content, output rules, and AI-marking schema
 - `--resume no`: start a new job.
 
 Canceled, failed, and interrupted jobs remain resumable. Completed jobs are not presented as resumable GUI work.
+The GUI presents a cooperatively canceled job as **Paused** and its Resume action uses the same compatibility
+checks as `--resume yes`. Pending queue entries are session-local; once a job begins, its state is persisted in
+its per-title checkpoint.

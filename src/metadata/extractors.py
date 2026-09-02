@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from metadata.epub_parser import parse_epub
+from metadata.epub_parser import read_epub_metadata
 from metadata.models import BookMetadata
 
 
 def extract_epub_metadata(epub_path: str) -> BookMetadata:
-    return parse_epub(epub_path).metadata
+    return read_epub_metadata(epub_path)
 
 
 def extract_text_fallback_metadata(text_path: str) -> BookMetadata:

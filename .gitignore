@@ -11,5 +11,14 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-audiobook_output/
-books/
+# Generated or downloaded works must never be staged by a broad `git add`.
+books/*
+!books/.gitkeep
+audiobook_output/*
+!audiobook_output/.gitkeep
+!audiobook_output/.autoaudio_state/
+audiobook_output/.autoaudio_state/*
+!audiobook_output/.autoaudio_state/.gitkeep
+!audiobook_output/.segments/
+audiobook_output/.segments/*
+!audiobook_output/.segments/.gitkeep

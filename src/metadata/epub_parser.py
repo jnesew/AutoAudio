@@ -66,6 +66,41 @@ def _cover_filename(href: str, media_type: str) -> str:
     return f"cover{extension}"
 
 
+def _package_metadata(package_metadata, *, chapters: tuple[ChapterMetadata, ...] = ()) -> BookMetadata:
+    subjects = tuple(
+        cleaned
+        for value in package_metadata.all("subject")
+        if (cleaned := _clean(value)) is not None
+    )
+    return BookMetadata(
+        title=_clean(package_metadata.primary_title),
+        author=_clean(package_metadata.primary_author),
+        language=_clean(package_metadata.primary_language),
+        publisher=_clean(package_metadata.first("publisher")),
+        rights=_clean(package_metadata.first("rights")),
+        description=_clean(package_metadata.first("description")),
+        identifier=_clean(package_metadata.primary_identifier),
+        subjects=subjects,
+        chapters=chapters,
+    )
+
+
+def read_epub_metadata(epub_path: str | Path) -> BookMetadata:
+    """Read package metadata without parsing every spine document."""
+    source = Path(epub_path)
+    if not source.is_file():
+        raise EpubParseError(f"EPUB file not found: {source}")
+    try:
+        with open_epub(source, mode=ParsingMode.COMPATIBILITY) as book:
+            if book.encryption.has_unsupported_drm:
+                raise EpubParseError("EPUB contains unsupported encrypted/DRM-protected resources.")
+            return _package_metadata(book.metadata)
+    except EpubParseError:
+        raise
+    except Exception as exc:
+        raise EpubParseError(f"Could not read EPUB metadata from {source}: {exc}") from exc
+
+
 def parse_epub(epub_path: str | Path) -> ParsedEpub:
     """Parse an EPUB once into normalized text, metadata, cover bytes, and diagnostics."""
     source = Path(epub_path)
@@ -112,23 +147,7 @@ def parse_epub(epub_path: str | Path) -> ParsedEpub:
                     )
                 )
 
-            package_metadata = book.metadata
-            subjects = tuple(
-                cleaned
-                for value in package_metadata.all("subject")
-                if (cleaned := _clean(value)) is not None
-            )
-            metadata = BookMetadata(
-                title=_clean(package_metadata.primary_title),
-                author=_clean(package_metadata.primary_author),
-                language=_clean(package_metadata.primary_language),
-                publisher=_clean(package_metadata.first("publisher")),
-                rights=_clean(package_metadata.first("rights")),
-                description=_clean(package_metadata.first("description")),
-                identifier=_clean(package_metadata.primary_identifier),
-                subjects=subjects,
-                chapters=tuple(chapters),
-            )
+            metadata = _package_metadata(book.metadata, chapters=tuple(chapters))
 
             cover: EpubCover | None = None
             if book.cover is not None:

@@ -107,7 +107,42 @@ def test_gui_uses_dropdowns_for_bundled_speaker_and_model_choices():
 def test_gui_connects_structured_progress_and_eta_updates():
     source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
 
-    assert "progress_changed = Signal(object)" in source
-    assert "progress_callback=self.progress_changed.emit" in source
+    assert "progress_changed = Signal(str, object)" in source
+    assert "progress_callback=lambda update: self.progress_changed.emit(self.job_id, update)" in source
     assert "self.worker.progress_changed.connect(self._on_progress)" in source
     assert "format_progress_text(update)" in source
+
+
+def test_gui_exposes_per_title_library_queue_and_cooperative_pause():
+    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+
+    assert 'self.tabs.addTab(self._build_library_tab(), "Library")' in source
+    assert "scan_library(books_dir, output_root)" in source
+    assert "self.library_tree.setItemWidget(item, 3, progress_bar)" in source
+    assert 'self._set_library_runtime_state(job_id, "Queued")' in source
+    assert 'self.cancel_btn = QPushButton("Pause active")' in source
+    assert 'self._set_library_runtime_state(job_id, "Paused", current_percent)' in source
+
+
+def test_gui_requires_confirmation_before_a_specific_gutenberg_download():
+    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+
+    assert "confirmation = QMessageBox(self)" in source
+    assert 'confirmation.setWindowTitle("Confirm Project Gutenberg download")' in source
+    assert "confirmation.setTextFormat(Qt.TextFormat.PlainText)" in source
+    assert "confirmation.setDefaultButton(QMessageBox.StandardButton.No)" in source
+    assert "if decision != QMessageBox.StandardButton.Yes:" in source
+    assert "self.client.download_epub(self.book, acquisition, self.books_dir)" in source
+
+
+def test_generated_and_downloaded_work_directories_keep_only_safe_placeholders_trackable():
+    ignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "books/*" in ignore
+    assert "!books/.gitkeep" in ignore
+    assert "audiobook_output/*" in ignore
+    assert "!audiobook_output/.gitkeep" in ignore
+    assert "audiobook_output/.autoaudio_state/*" in ignore
+    assert "audiobook_output/.segments/*" in ignore
+    assert (PROJECT_ROOT / "audiobook_output" / ".autoaudio_state" / ".gitkeep").is_file()
+    assert (PROJECT_ROOT / "audiobook_output" / ".segments" / ".gitkeep").is_file()

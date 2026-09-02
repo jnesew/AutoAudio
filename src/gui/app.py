@@ -11,6 +11,7 @@ from core.cancellation import CancellationToken
 from core.checkpoint import CheckpointStore
 from core.config import AppConfig, QWEN_MODEL_CHOICES_BY_MODE, QWEN_PRESET_SPEAKERS
 from core.errors import PipelineCancelled, format_user_error
+from core.library import LibraryBook, scan_library
 from core.narrator import NarratorCatalog
 from core.pipeline import (
     build_app_config,
@@ -21,6 +22,11 @@ from core.pipeline import (
 )
 from core.progress import ProgressUpdate, format_progress_text
 from gui.state import bool_from_ui_state, load_resume_context
+from metadata.gutenberg_catalog import (
+    GutenbergBook,
+    GutenbergCatalogClient,
+    GutenbergSearchPage,
+)
 
 
 class _SignalWriter(io.TextIOBase):
@@ -37,7 +43,7 @@ class _SignalWriter(io.TextIOBase):
 
 def launch_gui(project_root: Path) -> int:
     try:
-        from PySide6.QtCore import QObject, QThread, Signal
+        from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -58,6 +64,8 @@ def launch_gui(project_root: Path) -> int:
             QSpinBox,
             QTabWidget,
             QTextEdit,
+            QTreeWidget,
+            QTreeWidgetItem,
             QVBoxLayout,
             QWidget,
         )
@@ -114,12 +122,13 @@ def launch_gui(project_root: Path) -> int:
                 self.file_dropped.emit(first)
 
     class PipelineWorker(QObject):
-        finished = Signal(str, str)
-        log_line = Signal(str)
-        progress_changed = Signal(object)
+        finished = Signal(str, str, str)
+        log_line = Signal(str, str)
+        progress_changed = Signal(str, object)
 
-        def __init__(self, args: argparse.Namespace, config: AppConfig):
+        def __init__(self, job_id: str, args: argparse.Namespace, config: AppConfig):
             super().__init__()
+            self.job_id = job_id
             self.args = args
             self.config = config
             self.cancellation = CancellationToken()
@@ -128,21 +137,64 @@ def launch_gui(project_root: Path) -> int:
             self.cancellation.cancel()
 
         def run(self) -> None:
-            out_writer = _SignalWriter(self.log_line.emit)
+            out_writer = _SignalWriter(lambda line: self.log_line.emit(self.job_id, line))
             try:
                 with contextlib.redirect_stdout(out_writer), contextlib.redirect_stderr(out_writer):
                     run_pipeline(
                         self.args,
                         self.config,
                         cancellation=self.cancellation,
-                        progress_callback=self.progress_changed.emit,
+                        progress_callback=lambda update: self.progress_changed.emit(self.job_id, update),
                     )
-                self.finished.emit("completed", "Pipeline run completed.")
+                self.finished.emit(self.job_id, "completed", "Pipeline run completed.")
             except PipelineCancelled as exc:
-                self.finished.emit("cancelled", str(exc))
+                self.finished.emit(self.job_id, "paused", str(exc))
             except Exception as exc:  # noqa: BLE001
-                self.log_line.emit(traceback.format_exc())
-                self.finished.emit("failed", format_user_error(exc))
+                self.log_line.emit(self.job_id, traceback.format_exc())
+                self.finished.emit(self.job_id, "failed", format_user_error(exc))
+
+    class CatalogSearchWorker(QObject):
+        finished = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, client: GutenbergCatalogClient, query: str, page_url: str | None):
+            super().__init__()
+            self.client = client
+            self.query = query
+            self.page_url = page_url
+
+        def run(self) -> None:
+            try:
+                self.finished.emit(self.client.search(self.query, page_url=self.page_url))
+            except Exception as exc:  # noqa: BLE001 - worker failures must always release the UI thread.
+                self.failed.emit(str(exc))
+
+    class CatalogDownloadWorker(QObject):
+        finished = Signal(str)
+        failed = Signal(str)
+
+        def __init__(
+            self,
+            client: GutenbergCatalogClient,
+            book: GutenbergBook,
+            books_dir: Path,
+        ):
+            super().__init__()
+            self.client = client
+            self.book = book
+            self.books_dir = books_dir
+
+        def run(self) -> None:
+            acquisition = self.book.preferred_epub
+            if acquisition is None:
+                self.failed.emit("This catalog entry does not offer an EPUB download.")
+                return
+            try:
+                path = self.client.download_epub(self.book, acquisition, self.books_dir)
+            except Exception as exc:  # noqa: BLE001 - worker failures must always release the UI thread.
+                self.failed.emit(str(exc))
+                return
+            self.finished.emit(str(path))
 
     class MainWindow(QMainWindow):
         def __init__(self):
@@ -155,24 +207,44 @@ def launch_gui(project_root: Path) -> int:
             self.default_args = self.parser.parse_args([])
             self.app_config = AppConfig(project_root=self.project_root)
             self.narrator_catalog = NarratorCatalog.load(self.app_config.narrator_profiles_path)
+            self.catalog_client = GutenbergCatalogClient()
             self.worker_thread: QThread | None = None
             self.worker: PipelineWorker | None = None
+            self.catalog_thread: QThread | None = None
+            self.catalog_worker: CatalogSearchWorker | CatalogDownloadWorker | None = None
+            self.library_books: dict[str, LibraryBook] = {}
+            self.library_items: dict[str, QTreeWidgetItem] = {}
+            self.library_progress_bars: dict[str, QProgressBar] = {}
+            self.current_library_book_id: str | None = None
+            self.active_job_id: str | None = None
+            self.queued_jobs: list[tuple[str, argparse.Namespace]] = []
+            self.active_progress_percent = 0
+            self._catalog_books: dict[str, GutenbergBook] = {}
+            self._catalog_next_url: str | None = None
+            self._catalog_append_results = False
+            self._closing_after_pause = False
             self.resume_available = False
 
             central = QWidget()
             self.setCentralWidget(central)
             layout = QVBoxLayout(central)
             self.tabs = QTabWidget()
-            self.tabs.addTab(scrollable(self._build_book_tab()), "Book")
-            self.tabs.addTab(scrollable(self._build_narrator_tab()), "Narrator")
-            self.tabs.addTab(scrollable(self._build_output_runtime_tab()), "Output & Runtime")
-            self.tabs.addTab(scrollable(self._build_provenance_tab()), "Provenance")
+            self.library_tab_index = self.tabs.addTab(self._build_library_tab(), "Library")
+            self.discover_tab_index = self.tabs.addTab(self._build_discover_tab(), "Find books")
+            self.book_tab_index = self.tabs.addTab(scrollable(self._build_book_tab()), "Book")
+            self.narrator_tab_index = self.tabs.addTab(scrollable(self._build_narrator_tab()), "Narrator")
+            self.runtime_tab_index = self.tabs.addTab(
+                scrollable(self._build_output_runtime_tab()), "Output & Runtime"
+            )
+            self.provenance_tab_index = self.tabs.addTab(
+                scrollable(self._build_provenance_tab()), "Provenance"
+            )
             layout.addWidget(self.tabs, 1)
 
             controls = QHBoxLayout()
             self.start_btn = QPushButton("Start")
             self.resume_btn = QPushButton("Resume")
-            self.cancel_btn = QPushButton("Cancel")
+            self.cancel_btn = QPushButton("Pause active")
             self.resume_btn.setEnabled(False)
             self.cancel_btn.setEnabled(False)
             self.start_btn.clicked.connect(lambda: self._launch_from_ui("no"))
@@ -195,15 +267,101 @@ def launch_gui(project_root: Path) -> int:
             layout.addWidget(self.log, 1)
 
             self._on_narrator_profile_changed(self.narrator_profile_combo.currentIndex())
-            self._prepopulate_from_checkpoint()
-            self._on_input_changed(self.input_edit.text())
+            self._rescan_library()
+            if not self.current_library_book_id:
+                self._prepopulate_from_checkpoint()
+                self._on_input_changed(self.input_edit.text())
+
+        def _build_library_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+
+            locations = QGroupBox("Library locations")
+            location_layout = QGridLayout(locations)
+            self.books_dir_edit = QLineEdit(str(self.project_root / "books"))
+            self.library_output_root_edit = QLineEdit(str(self.project_root / "audiobook_output"))
+            books_button = QPushButton("Browse…")
+            books_button.clicked.connect(self._pick_books_dir)
+            output_button = QPushButton("Browse…")
+            output_button.clicked.connect(self._pick_library_output_root)
+            location_layout.addWidget(QLabel("Books directory"), 0, 0)
+            location_layout.addWidget(self.books_dir_edit, 0, 1)
+            location_layout.addWidget(books_button, 0, 2)
+            location_layout.addWidget(QLabel("Output root"), 1, 0)
+            location_layout.addWidget(self.library_output_root_edit, 1, 1)
+            location_layout.addWidget(output_button, 1, 2)
+            layout.addWidget(locations)
+
+            self.library_tree = QTreeWidget()
+            self.library_tree.setColumnCount(4)
+            self.library_tree.setHeaderLabels(("Title", "Author", "Status", "Progress"))
+            self.library_tree.setRootIsDecorated(False)
+            self.library_tree.setAlternatingRowColors(True)
+            self.library_tree.itemSelectionChanged.connect(self._on_library_selection_changed)
+            layout.addWidget(self.library_tree, 1)
+
+            controls = QHBoxLayout()
+            rescan_button = QPushButton("Rescan")
+            rescan_button.clicked.connect(self._rescan_library)
+            controls.addWidget(rescan_button)
+            controls.addStretch(1)
+            layout.addLayout(controls)
+            self.library_summary = QLabel("No supported books found.")
+            self.library_summary.setWordWrap(True)
+            layout.addWidget(self.library_summary)
+            return page
+
+        def _build_discover_tab(self) -> QWidget:
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            search_row = QHBoxLayout()
+            self.catalog_search_edit = QLineEdit()
+            self.catalog_search_edit.setPlaceholderText("Title, author, or search term")
+            self.catalog_search_edit.returnPressed.connect(self._search_gutenberg)
+            self.catalog_search_button = QPushButton("Search")
+            self.catalog_search_button.clicked.connect(self._search_gutenberg)
+            search_row.addWidget(self.catalog_search_edit, 1)
+            search_row.addWidget(self.catalog_search_button)
+            layout.addLayout(search_row)
+
+            notice = QLabel(
+                "Search uses Project Gutenberg's OPDS catalog. Downloads occur only after confirmation. "
+                "Project Gutenberg generally describes status under United States law; users outside the "
+                "United States must check their local copyright law."
+            )
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
+
+            self.catalog_tree = QTreeWidget()
+            self.catalog_tree.setColumnCount(4)
+            self.catalog_tree.setHeaderLabels(("Title", "Author", "Language", "EPUB"))
+            self.catalog_tree.setRootIsDecorated(False)
+            self.catalog_tree.setAlternatingRowColors(True)
+            self.catalog_tree.itemSelectionChanged.connect(self._on_catalog_selection_changed)
+            layout.addWidget(self.catalog_tree, 1)
+
+            controls = QHBoxLayout()
+            self.catalog_next_button = QPushButton("More results")
+            self.catalog_next_button.setEnabled(False)
+            self.catalog_next_button.clicked.connect(self._load_next_gutenberg_page)
+            self.catalog_download_button = QPushButton("Download selected EPUB…")
+            self.catalog_download_button.setEnabled(False)
+            self.catalog_download_button.clicked.connect(self._download_selected_gutenberg)
+            controls.addWidget(self.catalog_next_button)
+            controls.addWidget(self.catalog_download_button)
+            controls.addStretch(1)
+            layout.addLayout(controls)
+            self.catalog_status = QLabel("Enter a search and press Search.")
+            layout.addWidget(self.catalog_status)
+            return page
 
         def _build_book_tab(self) -> QWidget:
             page = QWidget()
             layout = QVBoxLayout(page)
             paths = QGroupBox("Input / Output")
             path_layout = QGridLayout(paths)
-            self.input_edit = FileDropLineEdit(self.default_args.input_book)
+            initial_input = self.default_args.input_book if os.path.isfile(self.default_args.input_book) else ""
+            self.input_edit = FileDropLineEdit(initial_input)
             self.input_edit.file_dropped.connect(self._on_input_changed)
             self.input_edit.editingFinished.connect(lambda: self._on_input_changed(self.input_edit.text()))
             input_button = QPushButton("Browse…")
@@ -376,6 +534,252 @@ def launch_gui(project_root: Path) -> int:
                 self.output_edit.setText(directory)
                 self._prepopulate_from_checkpoint()
 
+        def _pick_books_dir(self) -> None:
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Select books directory",
+                self.books_dir_edit.text() or str(self.project_root / "books"),
+            )
+            if directory:
+                self.books_dir_edit.setText(directory)
+                self._rescan_library()
+
+        def _pick_library_output_root(self) -> None:
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Select library output root",
+                self.library_output_root_edit.text() or str(self.project_root / "audiobook_output"),
+            )
+            if directory:
+                self.library_output_root_edit.setText(directory)
+                self._rescan_library()
+
+        def _queued_book_ids(self) -> set[str]:
+            return {job_id for job_id, _args in self.queued_jobs}
+
+        def _rescan_library(self, select_path: str | None = None) -> None:
+            books_dir = Path(self.books_dir_edit.text().strip() or self.project_root / "books")
+            output_root = Path(
+                self.library_output_root_edit.text().strip() or self.project_root / "audiobook_output"
+            )
+            books_dir.mkdir(parents=True, exist_ok=True)
+            output_root.mkdir(parents=True, exist_ok=True)
+            selected_id = self.current_library_book_id
+            entries = scan_library(books_dir, output_root)
+            self.library_books = {entry.id: entry for entry in entries}
+            self.library_items.clear()
+            self.library_progress_bars.clear()
+            self.library_tree.clear()
+            queued = self._queued_book_ids()
+            path_to_select = Path(select_path).resolve() if select_path else None
+            for entry in entries:
+                status = entry.status
+                percent = entry.progress_percent
+                if entry.id == self.active_job_id:
+                    status = "Running"
+                    percent = self.active_progress_percent
+                elif entry.id in queued:
+                    status = "Queued"
+                item = QTreeWidgetItem(
+                    (entry.title, entry.author, status, f"{percent}%" if percent else "—")
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, entry.id)
+                item.setToolTip(0, str(entry.source_path))
+                if entry.state_error:
+                    item.setToolTip(2, entry.state_error)
+                self.library_tree.addTopLevelItem(item)
+                self.library_items[entry.id] = item
+                progress_bar = QProgressBar()
+                progress_bar.setRange(0, 100)
+                progress_bar.setValue(percent)
+                progress_bar.setTextVisible(True)
+                self.library_tree.setItemWidget(item, 3, progress_bar)
+                self.library_progress_bars[entry.id] = progress_bar
+                if path_to_select and entry.source_path == path_to_select:
+                    selected_id = entry.id
+
+            self.library_tree.resizeColumnToContents(0)
+            self.library_tree.resizeColumnToContents(1)
+            self.library_tree.resizeColumnToContents(2)
+            self.library_summary.setText(
+                f"{len(entries)} supported title{'s' if len(entries) != 1 else ''}. "
+                "Generated audio, checkpoints, and segments remain outside version control."
+                if entries
+                else "No supported EPUB, TXT, Markdown, or RST books found."
+            )
+            if selected_id in self.library_items:
+                self.library_tree.setCurrentItem(self.library_items[selected_id])
+            elif entries:
+                self.library_tree.setCurrentItem(self.library_items[entries[0].id])
+            else:
+                self.current_library_book_id = None
+                self.resume_available = False
+                self._refresh_action_controls()
+
+        def _on_library_selection_changed(self) -> None:
+            selected = self.library_tree.selectedItems()
+            if not selected:
+                return
+            book_id = selected[0].data(0, Qt.ItemDataRole.UserRole)
+            entry = self.library_books.get(str(book_id))
+            if entry is None:
+                return
+            self.current_library_book_id = entry.id
+            self.input_edit.setText(str(entry.source_path))
+            self.output_edit.setText(str(entry.output_dir))
+            self.fetch_metadata_checkbox.setChecked(False)
+            self.gutenberg_id_edit.clear()
+            self.title_edit.clear()
+            self.author_edit.clear()
+            self._prepopulate_from_checkpoint()
+            self._on_input_changed(str(entry.source_path))
+            self._refresh_action_controls()
+
+        def _set_library_runtime_state(self, book_id: str, status: str, percent: int | None = None) -> None:
+            item = self.library_items.get(book_id)
+            if item is None:
+                return
+            item.setText(2, status)
+            if percent is not None:
+                item.setText(3, f"{percent}%" if percent else "—")
+                progress_bar = self.library_progress_bars.get(book_id)
+                if progress_bar is not None:
+                    progress_bar.setValue(percent)
+
+        def _search_gutenberg(self, _checked: bool = False, *, page_url: str | None = None) -> None:
+            if self.catalog_thread and self.catalog_thread.isRunning():
+                return
+            query = self.catalog_search_edit.text().strip()
+            if not query:
+                QMessageBox.warning(self, "Project Gutenberg", "Enter a title, author, or search term.")
+                return
+            self._catalog_append_results = page_url is not None
+            self.catalog_search_button.setEnabled(False)
+            self.catalog_next_button.setEnabled(False)
+            self.catalog_status.setText("Searching Project Gutenberg…")
+            self.catalog_thread = QThread(self)
+            self.catalog_worker = CatalogSearchWorker(self.catalog_client, query, page_url)
+            self.catalog_worker.moveToThread(self.catalog_thread)
+            self.catalog_thread.started.connect(self.catalog_worker.run)
+            self.catalog_worker.finished.connect(self._on_gutenberg_results)
+            self.catalog_worker.failed.connect(self._on_gutenberg_error)
+            self.catalog_worker.finished.connect(lambda *_: self.catalog_thread.quit())
+            self.catalog_worker.failed.connect(lambda *_: self.catalog_thread.quit())
+            self.catalog_thread.finished.connect(self._catalog_thread_stopped)
+            self.catalog_thread.start()
+
+        def _load_next_gutenberg_page(self) -> None:
+            if self._catalog_next_url:
+                self._search_gutenberg(page_url=self._catalog_next_url)
+
+        def _on_gutenberg_results(self, page: GutenbergSearchPage) -> None:
+            if not self._catalog_append_results:
+                self.catalog_tree.clear()
+                self._catalog_books.clear()
+            for book in page.books:
+                self._catalog_books[book.gutenberg_id] = book
+                acquisition = book.preferred_epub
+                format_text = acquisition.title if acquisition else "Unavailable"
+                item = QTreeWidgetItem((book.title, book.author_text, book.language, format_text))
+                item.setData(0, Qt.ItemDataRole.UserRole, book.gutenberg_id)
+                item.setToolTip(0, book.summary or book.landing_url)
+                self.catalog_tree.addTopLevelItem(item)
+            self._catalog_next_url = page.next_url
+            self.catalog_next_button.setEnabled(page.next_url is not None)
+            self.catalog_status.setText(
+                f"Showing {len(self._catalog_books)} result{'s' if len(self._catalog_books) != 1 else ''}."
+            )
+            self._on_catalog_selection_changed()
+
+        def _on_gutenberg_error(self, message: str) -> None:
+            self.catalog_status.setText(f"Search failed: {message}")
+            QMessageBox.warning(self, "Project Gutenberg", message)
+
+        def _catalog_thread_stopped(self) -> None:
+            self.catalog_thread = None
+            self.catalog_worker = None
+            self.catalog_search_button.setEnabled(True)
+            self.catalog_next_button.setEnabled(self._catalog_next_url is not None)
+
+        def _on_catalog_selection_changed(self) -> None:
+            selected = self.catalog_tree.selectedItems()
+            if not selected:
+                self.catalog_download_button.setEnabled(False)
+                return
+            gutenberg_id = str(selected[0].data(0, Qt.ItemDataRole.UserRole))
+            book = self._catalog_books.get(gutenberg_id)
+            self.catalog_download_button.setEnabled(book is not None and book.preferred_epub is not None)
+
+        @staticmethod
+        def _format_download_size(length: int | None) -> str:
+            if length is None:
+                return "not provided by the catalog"
+            if length < 1024 * 1024:
+                return f"{max(1, round(length / 1024))} KiB"
+            return f"{length / (1024 * 1024):.1f} MiB"
+
+        def _download_selected_gutenberg(self) -> None:
+            if self.catalog_thread and self.catalog_thread.isRunning():
+                return
+            selected = self.catalog_tree.selectedItems()
+            if not selected:
+                return
+            gutenberg_id = str(selected[0].data(0, Qt.ItemDataRole.UserRole))
+            book = self._catalog_books.get(gutenberg_id)
+            if book is None or book.preferred_epub is None:
+                return
+            acquisition = book.preferred_epub
+            confirmation = QMessageBox(self)
+            confirmation.setIcon(QMessageBox.Icon.Question)
+            confirmation.setWindowTitle("Confirm Project Gutenberg download")
+            confirmation.setTextFormat(Qt.TextFormat.PlainText)
+            confirmation.setText(
+                f"Download this specific book?\n\n"
+                f"Title: {book.title}\n"
+                f"Author: {book.author_text}\n"
+                f"Language: {book.language}\n"
+                f"Format: {acquisition.title}\n"
+                f"Size: {self._format_download_size(acquisition.length)}\n\n"
+                f"Catalog rights statement: {book.rights}\n\n"
+                "Project Gutenberg's United States public-domain assessment may not apply in your jurisdiction."
+            )
+            confirmation.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            confirmation.setDefaultButton(QMessageBox.StandardButton.No)
+            decision = confirmation.exec()
+            if decision != QMessageBox.StandardButton.Yes:
+                return
+
+            self.catalog_download_button.setEnabled(False)
+            self.catalog_search_button.setEnabled(False)
+            self.catalog_next_button.setEnabled(False)
+            self.catalog_status.setText(f"Downloading {book.title}…")
+            self.catalog_thread = QThread(self)
+            self.catalog_worker = CatalogDownloadWorker(
+                self.catalog_client,
+                book,
+                Path(self.books_dir_edit.text().strip() or self.project_root / "books"),
+            )
+            self.catalog_worker.moveToThread(self.catalog_thread)
+            self.catalog_thread.started.connect(self.catalog_worker.run)
+            self.catalog_worker.finished.connect(self._on_gutenberg_downloaded)
+            self.catalog_worker.failed.connect(self._on_gutenberg_download_error)
+            self.catalog_worker.finished.connect(lambda *_: self.catalog_thread.quit())
+            self.catalog_worker.failed.connect(lambda *_: self.catalog_thread.quit())
+            self.catalog_thread.finished.connect(self._catalog_thread_stopped)
+            self.catalog_thread.start()
+
+        def _on_gutenberg_downloaded(self, path: str) -> None:
+            self.catalog_status.setText(f"Downloaded {Path(path).name}.")
+            self._rescan_library(select_path=path)
+            self.tabs.setCurrentIndex(self.library_tab_index)
+            QMessageBox.information(self, "Project Gutenberg", f"Downloaded to:\n{path}")
+
+        def _on_gutenberg_download_error(self, message: str) -> None:
+            self.catalog_status.setText(f"Download failed: {message}")
+            QMessageBox.warning(self, "Project Gutenberg", message)
+
         def _on_narrator_profile_changed(self, _index: int) -> None:
             profile_id = self.narrator_profile_combo.currentData()
             if not profile_id:
@@ -404,10 +808,23 @@ def launch_gui(project_root: Path) -> int:
 
         def _on_input_changed(self, file_path: str) -> None:
             if not file_path or not os.path.exists(file_path):
+                self.current_library_book_id = None
                 self.meta_title.setText("-")
                 self.meta_author.setText("-")
                 self.meta_language.setText("-")
+                self._refresh_action_controls()
                 return
+            resolved_input = Path(file_path).resolve()
+            current = self.library_books.get(self.current_library_book_id or "")
+            if current is None or current.source_path != resolved_input:
+                self.current_library_book_id = next(
+                    (
+                        book.id
+                        for book in self.library_books.values()
+                        if book.source_path == resolved_input
+                    ),
+                    None,
+                )
             try:
                 args = self._collect_args(resume_mode="auto")
                 source_mode = detect_source_mode(file_path, args.source_mode)
@@ -419,6 +836,7 @@ def launch_gui(project_root: Path) -> int:
                 self.meta_title.setText("(unavailable)")
                 self.meta_author.setText("(unavailable)")
                 self.meta_language.setText("(unavailable)")
+            self._refresh_action_controls()
 
         @staticmethod
         def _optional_int(text: str, label: str) -> int | None:
@@ -499,15 +917,34 @@ def launch_gui(project_root: Path) -> int:
             self.log.append(line)
 
         def _set_running(self, running: bool) -> None:
-            self.tabs.setEnabled(not running)
-            self.start_btn.setEnabled(not running)
-            self.resume_btn.setEnabled((not running) and self.resume_available)
+            for index in (
+                self.discover_tab_index,
+                self.book_tab_index,
+                self.narrator_tab_index,
+                self.runtime_tab_index,
+                self.provenance_tab_index,
+            ):
+                self.tabs.setTabEnabled(index, not running)
+            self.tabs.setTabEnabled(self.library_tab_index, True)
             self.cancel_btn.setEnabled(running)
-            self.cancel_btn.setText("Cancel")
+            self.cancel_btn.setText("Pause active")
             if running:
                 self.progress.setRange(0, 0)
                 self.progress.setValue(0)
                 self.progress_status.setText("Preparing book plan…")
+            self._refresh_action_controls()
+
+        def _refresh_action_controls(self) -> None:
+            running = self.active_job_id is not None
+            current_id = self.current_library_book_id
+            current = self.library_books.get(current_id or "")
+            current_is_busy = current_id == self.active_job_id or current_id in self._queued_book_ids()
+            has_valid_input = os.path.isfile(self.input_edit.text().strip())
+            self.start_btn.setText("Queue conversion" if running else "Start")
+            self.resume_btn.setText("Queue resume" if running else "Resume")
+            self.start_btn.setEnabled(has_valid_input and not current_is_busy)
+            resumable = current.resumable if current is not None else self.resume_available
+            self.resume_btn.setEnabled(bool(resumable) and not current_is_busy)
 
         def _launch_from_ui(self, resume_mode: str) -> None:
             try:
@@ -515,41 +952,79 @@ def launch_gui(project_root: Path) -> int:
             except ValueError as exc:
                 QMessageBox.warning(self, "Invalid setting", str(exc))
                 return
-            self._launch_pipeline(args)
+            job_id = self.current_library_book_id or f"manual:{Path(args.input_book).resolve()}"
+            if self.worker_thread and self.worker_thread.isRunning():
+                if job_id == self.active_job_id or job_id in self._queued_book_ids():
+                    return
+                self.queued_jobs.append((job_id, args))
+                self._set_library_runtime_state(job_id, "Queued")
+                self._append_log(f"Queued {Path(args.input_book).name}.")
+                self._refresh_action_controls()
+                return
+            self._launch_pipeline(args, job_id)
 
         def _cancel_run(self) -> None:
             if self.worker and self.worker_thread and self.worker_thread.isRunning():
                 self.worker.cancel()
                 self.cancel_btn.setEnabled(False)
-                self.cancel_btn.setText("Canceling…")
-                self._append_log("Cancellation requested; waiting for the current safe operation to stop.")
+                self.cancel_btn.setText("Pausing…")
+                if self.active_job_id:
+                    self._set_library_runtime_state(
+                        self.active_job_id, "Pausing", self.active_progress_percent
+                    )
+                self._append_log("Pause requested; waiting for the current safe operation to checkpoint.")
 
-        def _launch_pipeline(self, args: argparse.Namespace) -> None:
+        def _launch_pipeline(self, args: argparse.Namespace, job_id: str) -> bool:
             if self.worker_thread and self.worker_thread.isRunning():
-                return
+                return False
             if not os.path.isfile(args.input_book):
                 QMessageBox.warning(self, "Invalid input", "Please select a valid input book file.")
-                return
-            os.makedirs(args.output_dir, exist_ok=True)
-            self.log.clear()
+                return False
+            try:
+                os.makedirs(args.output_dir, exist_ok=True)
+            except OSError as exc:
+                QMessageBox.warning(self, "Invalid output", f"Could not create the output directory:\n{exc}")
+                return False
+            if not self.queued_jobs:
+                self.log.clear()
+            self.active_job_id = job_id
+            self.active_progress_percent = 0
+            self._set_library_runtime_state(job_id, "Running", 0)
+            self.tabs.setCurrentIndex(self.library_tab_index)
             self._set_running(True)
             self.worker_thread = QThread(self)
-            self.worker = PipelineWorker(args=args, config=build_app_config(args, self.project_root))
+            self.worker = PipelineWorker(
+                job_id=job_id,
+                args=args,
+                config=build_app_config(args, self.project_root),
+            )
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
-            self.worker.log_line.connect(self._append_log)
+            self.worker.log_line.connect(self._on_worker_log)
             self.worker.progress_changed.connect(self._on_progress)
             self.worker.finished.connect(self._on_worker_finished)
             self.worker.finished.connect(lambda *_: self.worker_thread.quit())
+            self.worker_thread.finished.connect(self._worker_thread_stopped)
             self.worker_thread.start()
+            return True
 
-        def _on_progress(self, update: ProgressUpdate) -> None:
+        def _on_worker_log(self, job_id: str, line: str) -> None:
+            prefix = ""
+            entry = self.library_books.get(job_id)
+            if entry is not None:
+                prefix = f"[{entry.title}] "
+            self._append_log(f"{prefix}{line}")
+
+        def _on_progress(self, job_id: str, update: ProgressUpdate) -> None:
+            if job_id != self.active_job_id:
+                return
+            self.active_progress_percent = update.percent
             self.progress.setRange(0, 100)
             self.progress.setValue(update.percent)
             self.progress_status.setText(format_progress_text(update))
+            self._set_library_runtime_state(job_id, "Running", update.percent)
 
-        def _on_worker_finished(self, status: str, message: str) -> None:
-            self._set_running(False)
+        def _on_worker_finished(self, job_id: str, status: str, message: str) -> None:
             current_percent = max(0, self.progress.value())
             self.progress.setRange(0, 100)
             self.progress.setValue(current_percent)
@@ -557,16 +1032,45 @@ def launch_gui(project_root: Path) -> int:
                 self.progress.setValue(100)
                 self.progress_status.setText("Completed · 100%")
                 self._append_log(message)
-                QMessageBox.information(self, "AutoAudio", "Generation finished.")
-            elif status == "cancelled":
-                self.progress_status.setText(f"Canceled · {current_percent}%")
-                self._append_log(f"Canceled: {message}")
-                QMessageBox.information(self, "AutoAudio", "Run canceled. Resume state was saved.")
+                self._set_library_runtime_state(job_id, "Complete", 100)
+                if not self.queued_jobs:
+                    QMessageBox.information(self, "AutoAudio", "Generation finished.")
+            elif status == "paused":
+                self.progress_status.setText(f"Paused · {current_percent}%")
+                self._append_log(f"Paused: {message}")
+                self._set_library_runtime_state(job_id, "Paused", current_percent)
+                if not self.queued_jobs and not self._closing_after_pause:
+                    QMessageBox.information(self, "AutoAudio", "Run paused. Resume state was saved.")
             else:
                 self.progress_status.setText(f"Failed · {current_percent}%")
                 self._append_log(f"Failed: {message}")
+                self._set_library_runtime_state(job_id, "Failed", current_percent)
                 QMessageBox.critical(self, "AutoAudio", f"Generation failed:\n{message}")
-            self._prepopulate_from_checkpoint()
+
+        def _worker_thread_stopped(self) -> None:
+            finished_job_id = self.active_job_id
+            self.worker = None
+            self.worker_thread = None
+            self.active_job_id = None
+            self.active_progress_percent = 0
+            self._rescan_library()
+            if self._closing_after_pause:
+                self.queued_jobs.clear()
+                self._closing_after_pause = False
+                QTimer.singleShot(0, self.close)
+                return
+            while self.queued_jobs:
+                next_job_id, next_args = self.queued_jobs.pop(0)
+                entry = self.library_books.get(next_job_id)
+                next_item = self.library_items.get(next_job_id)
+                if entry is not None and next_item is not None:
+                    self.library_tree.setCurrentItem(next_item)
+                if self._launch_pipeline(next_args, next_job_id):
+                    return
+                self._append_log(f"Skipped unavailable queued input: {next_args.input_book}")
+            self._set_running(False)
+            if finished_job_id == self.current_library_book_id:
+                self._prepopulate_from_checkpoint()
 
         @staticmethod
         def _set_combo(widget: QComboBox, value) -> None:
@@ -653,7 +1157,17 @@ def launch_gui(project_root: Path) -> int:
 
         def closeEvent(self, event) -> None:
             if self.worker and self.worker_thread and self.worker_thread.isRunning():
+                self._closing_after_pause = True
+                self.queued_jobs.clear()
                 self._cancel_run()
+                event.ignore()
+                return
+            if self.catalog_thread and self.catalog_thread.isRunning():
+                QMessageBox.information(
+                    self,
+                    "AutoAudio",
+                    "Please wait for the current Project Gutenberg request to finish.",
+                )
                 event.ignore()
                 return
             super().closeEvent(event)

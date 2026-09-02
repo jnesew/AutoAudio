@@ -11,7 +11,13 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from metadata.epub_parser import EPUB_PARSER_POLICY_VERSION, EpubParseError, parse_epub, write_cover_art
+from metadata.epub_parser import (
+    EPUB_PARSER_POLICY_VERSION,
+    EpubParseError,
+    parse_epub,
+    read_epub_metadata,
+    write_cover_art,
+)
 
 
 def _write_fixture(path: Path) -> None:
@@ -114,6 +120,18 @@ def test_write_cover_art_uses_safe_output_name(tmp_path):
 
     assert cover_path == str(tmp_path / "output" / "cover.jpg")
     assert Path(cover_path).read_bytes() == parsed.cover.content
+
+
+def test_read_epub_metadata_skips_spine_text_parsing(tmp_path):
+    source = tmp_path / "fixture.epub"
+    _write_fixture(source)
+
+    metadata = read_epub_metadata(source)
+
+    assert metadata.title == "Fixture Book"
+    assert metadata.author == "Example Author"
+    assert metadata.language == "en"
+    assert metadata.chapters == ()
 
 
 def test_parse_epub_reports_missing_file(tmp_path):

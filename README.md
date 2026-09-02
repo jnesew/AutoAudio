@@ -18,10 +18,12 @@ autoaudio --version
 - FLAC, MP3, and M4B chapter and part outputs.
 - Lossless chapter assembly with configurable disclosure, segment, and chapter spacing.
 - Resumable jobs with immutable book plans and artifact-integrity checkpoints.
-- Cooperative cancellation from the GUI or `Ctrl+C`.
-- BookPlan-weighted GUI progress with a session-based remaining-time estimate.
+- Local library view with isolated per-title jobs, queued single-worker conversion, and pause/resume.
+- BookPlan-weighted per-title progress with a session-based remaining-time estimate.
+- User-confirmed Project Gutenberg OPDS search and EPUB download without bulk fetching or prefetching.
+- Cooperative pause from the GUI or cancellation with `Ctrl+C`.
 - Verified AudioSeal marking, AI metadata sidecars, and optional C2PA provenance.
-- Matching CLI and four-tab PySide6 GUI configuration.
+- Matching CLI and PySide6 GUI configuration.
 
 ## Requirements
 
@@ -64,11 +66,22 @@ Launch the desktop GUI:
 autoaudio --gui
 ```
 
+The GUI scans the `books` directory for EPUB, TXT, Markdown, and RST sources. Each source receives a
+content-addressed directory beneath `audiobook_output`, so an interrupted title can be resumed without
+overwriting or displacing another title's state. Existing incomplete checkpoints created directly in the
+old global `audiobook_output` directory remain discoverable and resumable.
+
+The **Find books** tab searches Project Gutenberg only when **Search** is pressed. It requests one OPDS
+result page at a time and downloads only the exact EPUB confirmed by the user. See
+[Library jobs and Project Gutenberg acquisition](Docs/library-and-gutenberg.md).
+
 Preset speakers are the stable default for long-form work. VoiceDesign remains experimental because independent generations may vary even with the same instruction and seed.
 
-## Cancel and resume
+## Pause, cancel, and resume
 
-Use **Cancel** in the GUI or press `Ctrl+C` in the CLI. AutoAudio requests cancellation from the active ComfyUI prompt, stops at a safe file boundary, and preserves a resumable checkpoint.
+Use **Pause active** in the GUI or press `Ctrl+C` in the CLI. AutoAudio requests cancellation from the
+active ComfyUI prompt, stops at a safe file boundary, and preserves a resumable checkpoint. GUI jobs are
+presented as paused; CLI interruption retains cancellation terminology and exit code 130.
 
 Resume with the same input, settings, workflows, plan, and output directory:
 
@@ -86,6 +99,10 @@ autoaudio \
 - Run log: `<output>/autoaudio_debug.log`
 - Resume state: `<output>/.autoaudio_state/checkpoint_state.json`
 - Immutable plan: `<output>/.autoaudio_state/book_plan.json`
+
+For library jobs, `<output>` is normally `audiobook_output/book-<source-hash-prefix>`. Downloaded source
+books, generated audio, checkpoints, and segments are ignored by Git. Only `.gitkeep` placeholders are
+tracked for the default directory structure.
 
 Internal lossless masters, silence assets, and temporary segments are maintained beneath the output directory while needed for safe resume and assembly.
 
@@ -105,6 +122,7 @@ The command fails if a publishable artifact has missing AI metadata, missing or 
 - [Narrators and Qwen settings](Docs/narrators.md)
 - [CLI reference](Docs/cli-reference.md)
 - [Resume, watermarking, and provenance](Docs/provenance-and-resume.md)
+- [Library jobs and Project Gutenberg acquisition](Docs/library-and-gutenberg.md)
 - [v2 release qualification](Docs/release-checklist.md)
 - [v2 migration record](Docs/v2-migration-plan.md)
 
