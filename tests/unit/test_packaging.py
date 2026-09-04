@@ -61,6 +61,7 @@ def test_packaging_contract_includes_runtime_packages_resources_and_notices():
         "gui",
         "metadata",
         "provenance",
+        "tts",
     }
     assert setuptools["package-dir"]["autoaudio_resources"] == "resources"
     assert set(setuptools["package-data"]["autoaudio_resources"]) == {

@@ -2,7 +2,7 @@
 
 ## Chapter disclosure
 
-At the beginning of a job, AutoAudio generates and checkpoints one neutral disclosure asset with the stable preset workflow. The same verified asset is placed exactly once at the beginning of every produced chapter. Narration text itself never contains disclosure or pause tokens.
+At the beginning of a job, AutoAudio generates and checkpoints one neutral disclosure asset through the selected provider. ComfyUI uses its stable preset workflow; OpenAI-compatible endpoints receive a neutral announcement instruction; ElevenLabs uses the selected existing voice. The same verified asset is placed exactly once at the beginning of every produced chapter. Narration text itself never contains disclosure or pause tokens.
 
 ## AudioSeal marking
 
@@ -33,9 +33,9 @@ C2PA is disabled by default. When enabled, AutoAudio invokes the selected C2PA t
 
 The manifest records:
 
-- Qwen3-TTS and the effective model choice.
+- The selected TTS model and provider backend.
 - AutoAudio and its runtime version.
-- The effective ComfyUI node class and an explicit backend version when the workflow supplies one.
+- For ComfyUI, the effective node class and an explicit backend version when the workflow supplies one.
 - A digest explicitly scoped to the encoded source bytes before C2PA embedding.
 
 The C2PA tool creates the container-specific hard binding. After embedding, AutoAudio rehashes the complete final container and refreshes its AI-marking sidecar and checkpoint records.
@@ -55,11 +55,11 @@ A resume is compatible only when all of these still match:
 
 - Input content SHA-256
 - Effective generation/settings SHA-256
-- Exact narration and disclosure workflow bytes
+- Exact narration and disclosure workflow bytes for ComfyUI, or the HTTP adapter compatibility identity
 - BookPlan SHA-256
 - Output directory
 
-The parser policy, narrator profile content, output rules, and AI-marking schema contribute to the effective settings identity. This prevents a job from silently mixing artifacts produced under incompatible behavior.
+The parser policy, narrator profile content, output rules, selected provider, endpoint, model, voice, response format, language code, and AI-marking schema contribute to the effective settings identity where applicable. The API-key environment-variable name is checkpointed, but its value is never persisted. This prevents a job from silently mixing artifacts produced under incompatible behavior.
 
 ## Per-title library state
 

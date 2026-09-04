@@ -1,4 +1,4 @@
-# Installation and ComfyUI setup
+# Installation and provider setup
 
 ## Python environment
 
@@ -28,6 +28,12 @@ PySide6 is required only for the desktop GUI. AudioSeal, PyTorch, librosa, Sound
 Install `ffmpeg` and `ffprobe` and make both commands available on `PATH`. AutoAudio uses them for audio normalization, lossless assembly, final encoding, and metadata.
 
 Optional C2PA signing requires `c2patool` or a compatible executable selected with `--provenance-tool`. The release candidate is qualified against `c2patool 0.27.16`. AutoAudio supplies signing credentials through a private temporary manifest as required by current `c2patool`; it also handles the tool's unsigned-M4B extension limitation internally.
+
+## Choose a TTS provider
+
+The default provider is ComfyUI, preserving existing commands and resumable jobs. OpenAI-compatible and ElevenLabs adapters use only Python's standard HTTP client, so no provider SDK is required. Full options and outbound-request behavior are described in [TTS providers](tts-providers.md).
+
+API keys are read from the environment only immediately before an explicitly requested HTTP operation. Put the secret in an environment variable, then give AutoAudio the variable's name with `--tts-api-key-env`. Secret values are not stored in configuration, logs, compatibility hashes, or checkpoints. Base URLs containing embedded credentials, query strings, or fragments are rejected so credentials cannot accidentally enter resumable state.
 
 ## ComfyUI contract
 
@@ -68,9 +74,13 @@ autoaudio \
   --comfyui-mode spoof
 ```
 
+AutoAudio does not perform provider health checks at startup or when a provider is selected. For an HTTP provider, a request is made only after the user starts/resumes a conversion or explicitly requests supported voice discovery.
+
 ## Troubleshooting
 
 - **Cannot connect to ComfyUI:** confirm the server address and that the Qwen nodes loaded without errors.
+- **HTTP TTS request fails:** confirm the base URL, model, existing voice ID, response format, and API-key environment variable.
+- **Voice discovery unavailable:** OpenAI-compatible endpoints have no standardized voice-list route; enter a voice ID manually. ElevenLabs discovery must be requested explicitly.
 - **Missing audio output:** verify the selected model exists and matches the narrator mode.
 - **Watermarking failure:** confirm the installed PyTorch and AudioSeal stack works on the selected platform. Start with `--watermark-device auto`; use `cpu` to diagnose accelerator problems or `cuda` to require NVIDIA CUDA/AMD ROCm. AutoAudio rejects unverified segment output.
 - **GUI unavailable:** install PySide6 in the active Python environment.

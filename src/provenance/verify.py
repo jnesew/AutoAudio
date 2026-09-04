@@ -12,13 +12,12 @@ if __package__ in {None, ""}:
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from provenance.ai_marking import AI_MARKING_COMMENT, AI_MARKING_SCHEMA
+from provenance.ai_marking import AI_MARKING_COMMENT, AI_MARKING_SCHEMA, LEGACY_COMFYUI_AI_MARKING_COMMENT
 
 
 AI_TAGS = {
     "ai_generated": "true",
     "ai_system": "AutoAudio",
-    "ai_provider": "ComfyUI",
 }
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".opus", ".m4b", ".mp4", ".m4a"}
 
@@ -71,6 +70,7 @@ def _probe_tags(artifact: Path) -> dict[str, str]:
 
 def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
     errors: list[str] = []
+    manifest: dict = {}
 
     manifest_path = _manifest_path(artifact)
     if not manifest_path.exists():
@@ -88,6 +88,8 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
             errors.append(f"manifest artifact name mismatch for {artifact.name}")
         if manifest.get("artifact_hash_scope") != "entire-artifact-bytes":
             errors.append(f"manifest hash scope mismatch for {artifact.name}")
+        if not isinstance(manifest.get("provider"), str) or not manifest.get("provider", "").strip():
+            errors.append(f"manifest provider is missing for {artifact.name}")
         expected_sha256 = manifest.get("artifact_sha256")
         actual_sha256 = _sha256_file(artifact)
         if expected_sha256 != actual_sha256:
@@ -110,7 +112,8 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
 
     portable_comment_marking = (
         artifact.suffix.lower() in {".m4b", ".m4a", ".mp4"}
-        and tags.get("comment", "").casefold() == AI_MARKING_COMMENT.casefold()
+        and tags.get("comment", "").casefold()
+        in {AI_MARKING_COMMENT.casefold(), LEGACY_COMFYUI_AI_MARKING_COMMENT.casefold()}
     )
     if not portable_comment_marking:
         for key, expected in AI_TAGS.items():
@@ -120,6 +123,13 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
 
         if not tags.get("ai_marking", ""):
             errors.append(f"metadata tag missing for {artifact.name}: ai_marking")
+        expected_provider = manifest.get("provider")
+        actual_provider = tags.get("ai_provider")
+        if expected_provider and (actual_provider is None or actual_provider.casefold() != str(expected_provider).casefold()):
+            errors.append(
+                f"metadata tag mismatch for {artifact.name}: "
+                f"ai_provider={actual_provider!r}, expected {expected_provider!r}"
+            )
 
     return (not errors), errors
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from provenance.c2pa import ProvenanceConfig
 
@@ -27,6 +29,41 @@ QWEN_MODEL_CHOICES = tuple(
     dict.fromkeys(choice for choices in QWEN_MODEL_CHOICES_BY_MODE.values() for choice in choices)
 )
 
+TTS_PROVIDER_CHOICES = ("comfyui", "openai-compatible", "elevenlabs")
+_ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class TTSConfig:
+    """Provider-neutral speech endpoint configuration.
+
+    API key *values* are deliberately never stored here. ``api_key_env`` names
+    an environment variable that is read only when an explicitly requested
+    provider operation is about to make an HTTP request.
+    """
+
+    provider: Literal["comfyui", "openai-compatible", "elevenlabs"] = "comfyui"
+    base_url: str = ""
+    api_key_env: str = "AUTOAUDIO_TTS_API_KEY"
+    model: str = ""
+    voice: str = ""
+    response_format: str = ""
+    language_code: str = ""
+
+    def __post_init__(self) -> None:
+        if self.provider not in TTS_PROVIDER_CHOICES:
+            raise ValueError(f"Unsupported TTS provider: {self.provider!r}.")
+        if self.api_key_env and not _ENVIRONMENT_VARIABLE_PATTERN.fullmatch(self.api_key_env):
+            raise ValueError("TTS API key environment variable name is invalid.")
+        if self.base_url:
+            parsed = urlparse(self.base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("TTS base URL must be an absolute http:// or https:// URL.")
+            if parsed.username or parsed.password:
+                raise ValueError("TTS base URL cannot contain credentials; use an API-key environment variable.")
+            if parsed.params or parsed.query or parsed.fragment:
+                raise ValueError("TTS base URL cannot contain parameters, a query string, or a fragment.")
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -42,6 +79,7 @@ class AppConfig:
     comfyui_server_address: str = "127.0.0.1:8188"
     comfyui_timeout_seconds: float = 900.0
     comfyui_spoof_scenario: str = "success"
+    tts: TTSConfig = field(default_factory=TTSConfig)
     provenance: ProvenanceConfig = field(default_factory=ProvenanceConfig)
 
     def __post_init__(self) -> None:

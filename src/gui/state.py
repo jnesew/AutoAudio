@@ -6,7 +6,7 @@ from typing import Any
 from core.checkpoint import CheckpointError, CheckpointStore
 
 
-GUI_CLI_EXCLUDED_DESTINATIONS = frozenset({"help", "gui", "resume", "version"})
+GUI_CLI_EXCLUDED_DESTINATIONS = frozenset({"help", "gui", "resume", "version", "discover_voices"})
 GUI_CONTROLLED_DESTINATIONS = frozenset(
     {
         "input_book",
@@ -53,6 +53,13 @@ GUI_CONTROLLED_DESTINATIONS = frozenset(
         "provenance_tool",
         "provenance_claim_generator",
         "comfyui_spoof_scenario",
+        "tts_provider",
+        "tts_base_url",
+        "tts_api_key_env",
+        "tts_model",
+        "tts_voice",
+        "tts_response_format",
+        "tts_language_code",
     }
 )
 

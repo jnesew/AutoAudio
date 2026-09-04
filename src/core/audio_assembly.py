@@ -143,6 +143,7 @@ def assemble_lossless_master(
     content_id: str,
     watermarked_source_files: Sequence[str],
     logger: logging.Logger,
+    ai_provider: str = "ComfyUI",
 ) -> str:
     if not audio_files:
         raise AudioStitchError("Cannot assemble an empty audio sequence.")
@@ -185,7 +186,7 @@ def assemble_lossless_master(
         str(ASSEMBLY_SAMPLE_RATE),
         "-ac",
         str(ASSEMBLY_CHANNELS),
-        *ai_marking_metadata_args(),
+        *ai_marking_metadata_args(provider=ai_provider),
         str(output),
     ]
 
@@ -202,6 +203,7 @@ def assemble_lossless_master(
             watermark_scope="source-artifacts",
             watermark_detail="All marked source artifacts were hash-checked and verified before lossless assembly.",
             source_artifacts=evidence,
+            provider=ai_provider,
         )
         return str(output)
     except Exception as exc:
@@ -267,6 +269,7 @@ def _encoding_command(
     metadata_path: Path | None,
     cover_image: str | None,
     include_cover: bool,
+    ai_provider: str,
 ) -> list[str]:
     adapter = adapter_for_extension(output_filename)
     context = MetadataContext(
@@ -308,7 +311,7 @@ def _encoding_command(
         command.extend(["-map", "0:a:0"])
 
     command.extend(adapter.ffmpeg_metadata_args(context))
-    command.extend(ai_marking_metadata_args())
+    command.extend(ai_marking_metadata_args(provider=ai_provider))
     if Path(output_filename).suffix.lower() == ".flac":
         command.extend(["-c:a", "copy"])
     else:
@@ -325,6 +328,7 @@ def encode_lossless_master(
     chapter_markers: Sequence[ChapterMarker] = (),
     cover_image: str | None = None,
     logger: logging.Logger,
+    ai_provider: str = "ComfyUI",
 ) -> str:
     master = str(master_path)
     output = str(output_filename)
@@ -347,6 +351,7 @@ def encode_lossless_master(
             metadata_path=metadata_path,
             cover_image=cover_image,
             include_cover=include_cover,
+            ai_provider=ai_provider,
         )
         try:
             _run_ffmpeg(command)
@@ -362,6 +367,7 @@ def encode_lossless_master(
                     metadata_path=metadata_path,
                     cover_image=None,
                     include_cover=False,
+                    ai_provider=ai_provider,
                 )
             )
 
@@ -375,6 +381,7 @@ def encode_lossless_master(
             watermark_scope="source-artifacts",
             watermark_detail="Verified source watermarks were preserved through final container encoding.",
             source_artifacts=evidence.sources if evidence.sources else (evidence,),
+            provider=ai_provider,
         )
         return output
     except Exception as exc:

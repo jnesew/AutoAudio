@@ -9,7 +9,13 @@ from pathlib import Path
 
 from core.cancellation import CancellationToken
 from core.checkpoint import CheckpointStore
-from core.config import AppConfig, QWEN_MODEL_CHOICES_BY_MODE, QWEN_PRESET_SPEAKERS
+from core.config import (
+    AppConfig,
+    QWEN_MODEL_CHOICES_BY_MODE,
+    QWEN_PRESET_SPEAKERS,
+    TTSConfig,
+    TTS_PROVIDER_CHOICES,
+)
 from core.errors import PipelineCancelled, format_user_error
 from core.library import LibraryBook, scan_library
 from core.narrator import NarratorCatalog
@@ -27,6 +33,7 @@ from metadata.gutenberg_catalog import (
     GutenbergCatalogClient,
     GutenbergSearchPage,
 )
+from tts import discover_provider_voices
 
 
 class _SignalWriter(io.TextIOBase):
@@ -211,6 +218,26 @@ def launch_gui(project_root: Path) -> int:
                 return
             self.finished.emit(str(path))
 
+    class VoiceDiscoveryWorker(QObject):
+        finished = Signal(str, object)
+        failed = Signal(str, str)
+
+        def __init__(self, config: TTSConfig, timeout_seconds: float | None):
+            super().__init__()
+            self.config = config
+            self.timeout_seconds = timeout_seconds
+
+        def run(self) -> None:
+            try:
+                voices = discover_provider_voices(
+                    self.config,
+                    timeout_seconds=self.timeout_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001 - worker failures must always release the UI thread.
+                self.failed.emit(self.config.provider, str(exc))
+                return
+            self.finished.emit(self.config.provider, voices)
+
     class MainWindow(QMainWindow):
         def __init__(self):
             super().__init__()
@@ -227,6 +254,8 @@ def launch_gui(project_root: Path) -> int:
             self.worker: PipelineWorker | None = None
             self.catalog_thread: QThread | None = None
             self.catalog_worker: CatalogSearchWorker | CatalogDetailsWorker | CatalogDownloadWorker | None = None
+            self.voice_thread: QThread | None = None
+            self.voice_worker: VoiceDiscoveryWorker | None = None
             self.library_books: dict[str, LibraryBook] = {}
             self.library_items: dict[str, QTreeWidgetItem] = {}
             self.library_progress_bars: dict[str, QProgressBar] = {}
@@ -284,6 +313,7 @@ def launch_gui(project_root: Path) -> int:
             layout.addWidget(self.log, 1)
 
             self._on_narrator_profile_changed(self.narrator_profile_combo.currentIndex())
+            self._on_tts_provider_changed(self.tts_provider_combo.currentIndex())
             self._rescan_library()
             if not self.current_library_book_id:
                 self._prepopulate_from_checkpoint()
@@ -462,6 +492,21 @@ def launch_gui(project_root: Path) -> int:
             self.repetition_penalty_spin = decimal(1.05, 0.001, 100.0)
             self.attention_combo = combo(("sdpa", "flash_attn"), "sdpa")
             self.unload_model_checkbox = QCheckBox("Unload model after each generation")
+            self.tts_model_edit = QLineEdit()
+            self.tts_model_edit.setPlaceholderText("Required for OpenAI-compatible; ElevenLabs has a default")
+            self.tts_voice_combo = QComboBox()
+            self.tts_voice_combo.setEditable(True)
+            self.tts_voice_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            self.tts_response_format_edit = QLineEdit()
+            self.tts_response_format_edit.setPlaceholderText("Provider default")
+            self.tts_language_code_edit = QLineEdit()
+            self.tts_language_code_edit.setPlaceholderText("Optional ISO 639-1 code, e.g. en")
+            self.voice_discovery_button = QPushButton("Discover voices")
+            self.voice_discovery_button.clicked.connect(self._discover_voices)
+            self.voice_discovery_status = QLabel(
+                "Voice discovery never runs automatically; use this button to request it."
+            )
+            self.voice_discovery_status.setWordWrap(True)
             form.addRow("Narrator profile", self.narrator_profile_combo)
             form.addRow(self.narrator_detail)
             form.addRow("Preset speaker", self.speaker_combo)
@@ -478,6 +523,12 @@ def launch_gui(project_root: Path) -> int:
             form.addRow("Repetition penalty", self.repetition_penalty_spin)
             form.addRow("Attention", self.attention_combo)
             form.addRow(self.unload_model_checkbox)
+            form.addRow("Endpoint model", self.tts_model_edit)
+            form.addRow("Endpoint voice id", self.tts_voice_combo)
+            form.addRow("Endpoint response format", self.tts_response_format_edit)
+            form.addRow("Endpoint language code", self.tts_language_code_edit)
+            form.addRow(self.voice_discovery_button)
+            form.addRow(self.voice_discovery_status)
             self.narrator_profile_combo.currentIndexChanged.connect(self._on_narrator_profile_changed)
             return page
 
@@ -489,6 +540,10 @@ def launch_gui(project_root: Path) -> int:
             self.disclosure_gap_spin = spin(self.default_args.disclosure_gap_ms, 0, 60_000)
             self.segment_gap_spin = spin(self.default_args.segment_gap_ms, 0, 60_000)
             self.chapter_gap_spin = spin(self.default_args.chapter_gap_ms, 0, 60_000)
+            self.tts_provider_combo = combo(TTS_PROVIDER_CHOICES, self.default_args.tts_provider)
+            self.tts_base_url_edit = QLineEdit()
+            self.tts_base_url_edit.setPlaceholderText("Blank uses the provider default")
+            self.tts_api_key_env_edit = QLineEdit(self.default_args.tts_api_key_env)
             self.comfyui_mode_combo = combo(("network", "spoof"), self.default_args.comfyui_mode)
             self.comfyui_address_edit = QLineEdit(self.default_args.comfyui_server_address)
             self.comfyui_timeout_edit = QLineEdit()
@@ -502,10 +557,14 @@ def launch_gui(project_root: Path) -> int:
             form.addRow("Disclosure gap (ms)", self.disclosure_gap_spin)
             form.addRow("Segment gap (ms)", self.segment_gap_spin)
             form.addRow("Chapter gap (ms)", self.chapter_gap_spin)
+            form.addRow("TTS provider", self.tts_provider_combo)
+            form.addRow("TTS base URL", self.tts_base_url_edit)
+            form.addRow("API key environment variable", self.tts_api_key_env_edit)
             form.addRow("ComfyUI mode", self.comfyui_mode_combo)
             form.addRow("ComfyUI server", self.comfyui_address_edit)
-            form.addRow("ComfyUI timeout (seconds)", self.comfyui_timeout_edit)
+            form.addRow("TTS timeout (seconds)", self.comfyui_timeout_edit)
             form.addRow("Spoof test scenario", self.spoof_scenario_combo)
+            self.tts_provider_combo.currentIndexChanged.connect(self._on_tts_provider_changed)
             return page
 
         def _build_provenance_tab(self) -> QWidget:
@@ -901,6 +960,117 @@ def launch_gui(project_root: Path) -> int:
             label = "Stable preset" if profile.stability == "stable" else "Experimental VoiceDesign"
             self.narrator_detail.setText(f"{label}: {profile.description}")
 
+        def _on_tts_provider_changed(self, _index: int) -> None:
+            """Update controls only; provider changes must never contact an endpoint."""
+            provider = self.tts_provider_combo.currentText()
+            is_comfyui = provider == "comfyui"
+            is_elevenlabs = provider == "elevenlabs"
+            for widget in (
+                self.narrator_profile_combo,
+                self.speaker_combo,
+                self.model_choice_combo,
+                self.device_edit,
+                self.precision_edit,
+                self.language_edit,
+                self.seed_edit,
+                self.max_new_tokens_spin,
+                self.top_p_spin,
+                self.top_k_spin,
+                self.temperature_spin,
+                self.repetition_penalty_spin,
+                self.attention_combo,
+                self.unload_model_checkbox,
+                self.comfyui_mode_combo,
+                self.comfyui_address_edit,
+                self.spoof_scenario_combo,
+            ):
+                widget.setEnabled(is_comfyui)
+            self.voice_instruct_edit.setEnabled(provider in {"comfyui", "openai-compatible"})
+            for widget in (
+                self.tts_model_edit,
+                self.tts_voice_combo,
+                self.tts_response_format_edit,
+                self.tts_base_url_edit,
+                self.tts_api_key_env_edit,
+            ):
+                widget.setEnabled(not is_comfyui)
+            self.tts_language_code_edit.setEnabled(is_elevenlabs)
+            self.voice_discovery_button.setEnabled(is_elevenlabs and self.voice_thread is None)
+            if is_comfyui:
+                self.voice_discovery_status.setText(
+                    "Bundled Qwen voices are already listed locally; no endpoint request is needed."
+                )
+            elif provider == "openai-compatible":
+                self.voice_discovery_status.setText(
+                    "OpenAI-compatible TTS has no standard voice-list endpoint; enter a voice id manually."
+                )
+            else:
+                self.voice_discovery_status.setText(
+                    "Voice discovery is idle. Press Discover voices to contact ElevenLabs explicitly."
+                )
+
+        def _voice_discovery_config(self) -> TTSConfig:
+            return TTSConfig(
+                provider=self.tts_provider_combo.currentText(),
+                base_url=self.tts_base_url_edit.text().strip(),
+                api_key_env=self.tts_api_key_env_edit.text().strip(),
+                model=self.tts_model_edit.text().strip(),
+                voice=self._selected_tts_voice(),
+                response_format=self.tts_response_format_edit.text().strip(),
+                language_code=self.tts_language_code_edit.text().strip(),
+            )
+
+        def _selected_tts_voice(self) -> str:
+            value = self.tts_voice_combo.currentData()
+            return str(value).strip() if value else self.tts_voice_combo.currentText().strip()
+
+        def _discover_voices(self) -> None:
+            if self.voice_thread and self.voice_thread.isRunning():
+                return
+            try:
+                config = self._voice_discovery_config()
+                timeout = self._optional_float(self.comfyui_timeout_edit.text(), "TTS timeout")
+            except ValueError as exc:
+                QMessageBox.warning(self, "Invalid TTS setting", str(exc))
+                return
+            self.voice_discovery_button.setEnabled(False)
+            self.voice_discovery_status.setText(f"Requesting {config.provider} voices…")
+            self.voice_thread = QThread(self)
+            self.voice_worker = VoiceDiscoveryWorker(config, timeout)
+            self.voice_worker.moveToThread(self.voice_thread)
+            self.voice_thread.started.connect(self.voice_worker.run)
+            self.voice_worker.finished.connect(self._on_voices_discovered)
+            self.voice_worker.failed.connect(self._on_voice_discovery_failed)
+            self.voice_worker.finished.connect(lambda *_: self.voice_thread.quit())
+            self.voice_worker.failed.connect(lambda *_: self.voice_thread.quit())
+            self.voice_thread.finished.connect(self._voice_discovery_stopped)
+            self.voice_thread.start()
+
+        def _on_voices_discovered(self, provider: str, voices) -> None:
+            if provider != self.tts_provider_combo.currentText():
+                return
+            selected = self._selected_tts_voice()
+            self.tts_voice_combo.clear()
+            for voice in voices:
+                self.tts_voice_combo.addItem(voice.display_name, voice.id)
+            if selected:
+                self._set_combo(self.tts_voice_combo, selected)
+                if self.tts_voice_combo.findData(selected) < 0:
+                    self.tts_voice_combo.setEditText(selected)
+            self.voice_discovery_status.setText(
+                f"Loaded {len(voices)} eligible premade or generated voice{'s' if len(voices) != 1 else ''}."
+            )
+
+        def _on_voice_discovery_failed(self, provider: str, message: str) -> None:
+            if provider == self.tts_provider_combo.currentText():
+                self.voice_discovery_status.setText(f"Voice discovery failed: {message}")
+                QMessageBox.warning(self, "Voice discovery", message)
+
+        def _voice_discovery_stopped(self) -> None:
+            self.voice_thread = None
+            self.voice_worker = None
+            self._on_tts_provider_changed(self.tts_provider_combo.currentIndex())
+
         def _on_input_changed(self, file_path: str) -> None:
             if not file_path or not os.path.exists(file_path):
                 self.current_library_book_id = None
@@ -998,6 +1168,13 @@ def launch_gui(project_root: Path) -> int:
                 self.comfyui_timeout_edit.text(), "ComfyUI timeout"
             )
             args.comfyui_spoof_scenario = self.spoof_scenario_combo.currentText()
+            args.tts_provider = self.tts_provider_combo.currentText()
+            args.tts_base_url = self.tts_base_url_edit.text().strip()
+            args.tts_api_key_env = self.tts_api_key_env_edit.text().strip()
+            args.tts_model = self.tts_model_edit.text().strip()
+            args.tts_voice = self._selected_tts_voice()
+            args.tts_response_format = self.tts_response_format_edit.text().strip()
+            args.tts_language_code = self.tts_language_code_edit.text().strip()
             args.resume = resume_mode
             args.provenance_enabled = self.provenance_enabled_checkbox.isChecked()
             args.provenance_cert_path = self.provenance_cert_edit.text().strip()
@@ -1199,6 +1376,7 @@ def launch_gui(project_root: Path) -> int:
             self._set_combo(self.output_format_combo, state.get("output_format"))
             self._set_combo(self.watermark_device_combo, state.get("watermark_device"))
             self._set_combo(self.comfyui_mode_combo, state.get("comfyui_mode"))
+            self._set_combo(self.tts_provider_combo, state.get("tts_provider"))
             self._set_combo(self.spoof_scenario_combo, state.get("comfyui_spoof_scenario"))
             self._set_combo(self.attention_combo, state.get("attention"))
             self._set_combo(self.provenance_failure_combo, state.get("provenance_failure_mode"))
@@ -1235,12 +1413,19 @@ def launch_gui(project_root: Path) -> int:
                 (self.author_edit, "author"),
                 (self.comfyui_address_edit, "comfyui_server_address"),
                 (self.comfyui_timeout_edit, "comfyui_timeout_seconds"),
+                (self.tts_base_url_edit, "tts_base_url"),
+                (self.tts_api_key_env_edit, "tts_api_key_env"),
+                (self.tts_model_edit, "tts_model"),
+                (self.tts_response_format_edit, "tts_response_format"),
+                (self.tts_language_code_edit, "tts_language_code"),
                 (self.provenance_cert_edit, "provenance_cert_path"),
                 (self.provenance_key_edit, "provenance_key_path"),
                 (self.provenance_tool_edit, "provenance_tool"),
                 (self.provenance_claim_edit, "provenance_claim_generator"),
             ):
                 self._restore_text(widget, state, key)
+            if state.get("tts_voice") is not None:
+                self.tts_voice_combo.setEditText(str(state["tts_voice"]))
             self.fetch_metadata_checkbox.setChecked(bool_from_ui_state(state.get("fetch_metadata"), default=False))
             self.unload_model_checkbox.setChecked(
                 bool_from_ui_state(state.get("unload_model_after_generate"), default=False)
@@ -1262,6 +1447,14 @@ def launch_gui(project_root: Path) -> int:
                     self,
                     "AutoAudio",
                     "Please wait for the current Project Gutenberg request to finish.",
+                )
+                event.ignore()
+                return
+            if self.voice_thread and self.voice_thread.isRunning():
+                QMessageBox.information(
+                    self,
+                    "AutoAudio",
+                    "Please wait for the explicitly requested voice discovery to finish.",
                 )
                 event.ignore()
                 return

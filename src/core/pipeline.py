@@ -13,9 +13,6 @@ from pathlib import Path
 
 from comfyui.client import (
     ComfyUIClient,
-    ComfyUIClientError,
-    ComfyUIConnectionError as ClientComfyUIConnectionError,
-    ComfyUIProtocolError as ClientComfyUIProtocolError,
 )
 from comfyui.real_client import RealComfyUIClient
 from comfyui.spoof_client import SpoofComfyUIClient
@@ -39,7 +36,14 @@ from core.checkpoint import (
     validate_artifact,
 )
 from core.cancellation import CancellationToken
-from core.config import AppConfig, GenerationSettings, QWEN_MODEL_CHOICES, QWEN_PRESET_SPEAKERS
+from core.config import (
+    AppConfig,
+    GenerationSettings,
+    QWEN_MODEL_CHOICES,
+    QWEN_PRESET_SPEAKERS,
+    TTSConfig,
+    TTS_PROVIDER_CHOICES,
+)
 from core.errors import (
     AudioStitchError,
     ComfyUIConnectionError,
@@ -49,6 +53,8 @@ from core.errors import (
     PipelineRuntimeError,
     PipelineCancelled,
     ResumeStateError,
+    TTSConnectionError,
+    TTSProtocolError,
 )
 from core.filenames import safe_filename_component
 from core.logging_utils import configure_run_logger
@@ -85,6 +91,16 @@ from provenance.c2pa import (
     ProvenanceConfig,
     ProvenanceRuntimeMetadata,
     apply_c2pa_with_policy,
+)
+from tts import (
+    SpeechProvider,
+    SynthesisPurpose,
+    TTSClientError,
+    TTSConfigurationError as ClientTTSConfigurationError,
+    TTSConnectionError as ClientTTSConnectionError,
+    TTSProtocolError as ClientTTSProtocolError,
+    build_speech_provider,
+    discover_provider_voices,
 )
 
 
@@ -220,27 +236,29 @@ def build_qwen_book_plan(
 def process_segment(
     *,
     text_segment: str,
-    workflow_template: dict,
-    settings: GenerationSettings,
+    speech_provider: SpeechProvider,
     config: AppConfig,
-    comfyui_client: ComfyUIClient,
+    purpose: SynthesisPurpose = "narration",
+    instructions: str = "",
     cancellation: CancellationToken | None = None,
 ) -> tuple[bytes | None, str | None]:
     try:
-        artifact = comfyui_client.generate_audio(
-            workflow_template=workflow_template,
+        artifact = speech_provider.generate_audio(
             text_segment=text_segment,
-            settings=settings,
+            purpose=purpose,
             timeout_seconds=config.comfyui_timeout_seconds,
             cancellation=cancellation,
+            instructions=instructions,
         )
         return artifact.content, artifact.extension
-    except ClientComfyUIConnectionError as exc:
-        raise ComfyUIConnectionError(str(exc)) from exc
-    except ClientComfyUIProtocolError as exc:
-        raise ComfyUIProtocolError(str(exc)) from exc
-    except ComfyUIClientError as exc:
-        raise PipelineRuntimeError(f"ComfyUI request failed: {exc}") from exc
+    except ClientTTSConfigurationError as exc:
+        raise InputValidationError(f"Invalid TTS provider configuration: {exc}") from exc
+    except ClientTTSConnectionError as exc:
+        raise TTSConnectionError(str(exc)) from exc
+    except ClientTTSProtocolError as exc:
+        raise TTSProtocolError(str(exc)) from exc
+    except TTSClientError as exc:
+        raise PipelineRuntimeError(f"TTS provider request failed: {exc}") from exc
 
 
 def write_watermarked_audio_artifact(
@@ -249,6 +267,7 @@ def write_watermarked_audio_artifact(
     output_path: str | Path,
     content_id: str,
     watermark_device: str,
+    ai_provider: str,
     logger: logging.Logger,
 ) -> None:
     output_path = str(output_path)
@@ -266,7 +285,7 @@ def write_watermarked_audio_artifact(
 
     adapter = adapter_for_extension(output_path)
     command = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
-    command.extend(ai_marking_metadata_args())
+    command.extend(ai_marking_metadata_args(provider=ai_provider))
     command.extend(adapter.ffmpeg_output_args())
     command.extend(["-ar", str(ASSEMBLY_SAMPLE_RATE), "-ac", str(ASSEMBLY_CHANNELS)])
     command.append(output_path)
@@ -288,15 +307,15 @@ def write_watermarked_audio_artifact(
         watermark_applied=watermark_result.applied,
         watermark_verified=watermark_result.verified,
         watermark_detail=watermark_result.detail,
+        provider=ai_provider,
     )
 
 
 def ensure_disclosure_asset(
     *,
     state_dir: Path,
-    workflow_template: dict,
     config: AppConfig,
-    comfyui_client: ComfyUIClient,
+    speech_provider: SpeechProvider,
     checkpoint: dict,
     checkpoint_store: CheckpointStore,
     watermark_device: str,
@@ -317,33 +336,15 @@ def ensure_disclosure_asset(
         except ValueError:
             remove_artifact_and_manifest(disclosure.get("path", ""))
 
-    settings = GenerationSettings(
-        voice_mode="preset",
-        speaker="Eric",
-        instruct="Use a neutral, clear announcement voice with steady pacing.",
-        model_choice="1.7B",
-        device="auto",
-        precision="bf16",
-        language="English",
-        seed=268583702137267,
-        max_new_tokens=2048,
-        top_p=0.8,
-        top_k=20,
-        temperature=1.0,
-        repetition_penalty=1.05,
-        attention="sdpa",
-        unload_model_after_generate=False,
-    )
     audio_data, _audio_ext = process_segment(
         text_segment=CHAPTER_DISCLOSURE_TEXT,
-        workflow_template=workflow_template,
-        settings=settings,
+        speech_provider=speech_provider,
         config=config,
-        comfyui_client=comfyui_client,
+        purpose="disclosure",
         cancellation=cancellation,
     )
     if not audio_data or len(audio_data) <= 16:
-        raise ComfyUIProtocolError("Chapter disclosure generation returned an invalid audio payload.")
+        raise TTSProtocolError("Chapter disclosure generation returned an invalid audio payload.")
 
     output_path = state_dir / "chapter_disclosure.flac"
     content_id = "autoaudio_chapter_disclosure_v1"
@@ -352,6 +353,7 @@ def ensure_disclosure_asset(
         output_path=output_path,
         content_id=content_id,
         watermark_device=watermark_device,
+        ai_provider=speech_provider.identity.provider_name,
         logger=logger,
     )
     sidecar_path = manifest_path_for(output_path)
@@ -520,6 +522,18 @@ def _extract_provenance_runtime_metadata(
     )
 
 
+def _provider_provenance_runtime_metadata(speech_provider: SpeechProvider) -> ProvenanceRuntimeMetadata:
+    identity = speech_provider.identity
+    return ProvenanceRuntimeMetadata(
+        model_name=identity.model_name,
+        model_version=identity.model_version,
+        backend_name=identity.backend_name,
+        backend_version=identity.backend_version,
+        software_name="AutoAudio",
+        software_version=runtime_autoaudio_version(),
+    )
+
+
 def extract_cover_art(epub_path: str, output_dir: str):
     try:
         cover_path = write_cover_art(parse_epub(epub_path), output_dir)
@@ -582,7 +596,7 @@ def resolve_metadata(
 
 
 def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate audiobook audio from EPUB or plain text using ComfyUI/Qwen3-TTS.")
+    parser = argparse.ArgumentParser(description="Generate audiobook audio from EPUB or plain text using selectable TTS providers.")
     parser.add_argument("--input-book", default=str(project_root / "pg35-images-3.epub"), help="Path to the input EPUB/TXT/MD file.")
     parser.add_argument("--output-dir", default=str(project_root / "audiobook_output"), help="Directory for generated audio.")
     parser.add_argument("--source-mode", choices=["auto", "epub", "text"], default="auto")
@@ -647,7 +661,34 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--author", default="", help="Override audiobook author (highest metadata priority).")
     parser.add_argument("--comfyui-mode", choices=["network", "spoof"], default="network")
     parser.add_argument("--comfyui-server-address", default="127.0.0.1:8188")
-    parser.add_argument("--comfyui-timeout-seconds", type=float, default=None, help="Overrides config default if provided.")
+    parser.add_argument(
+        "--tts-timeout-seconds",
+        "--comfyui-timeout-seconds",
+        dest="comfyui_timeout_seconds",
+        type=float,
+        default=None,
+        help="TTS request timeout. The ComfyUI option name remains as a compatibility alias.",
+    )
+    parser.add_argument("--tts-provider", choices=TTS_PROVIDER_CHOICES, default="comfyui")
+    parser.add_argument(
+        "--tts-base-url",
+        default="",
+        help="Optional provider base URL. Blank uses the selected adapter's default.",
+    )
+    parser.add_argument(
+        "--tts-api-key-env",
+        default="AUTOAUDIO_TTS_API_KEY",
+        help="Environment variable containing the provider API key; the key itself is never checkpointed.",
+    )
+    parser.add_argument("--tts-model", default="", help="Model id for an HTTP TTS provider.")
+    parser.add_argument("--tts-voice", default="", help="Existing voice id for an HTTP TTS provider.")
+    parser.add_argument("--tts-response-format", default="", help="Provider response format; blank uses its default.")
+    parser.add_argument("--tts-language-code", default="", help="Optional provider language code such as en or fi.")
+    parser.add_argument(
+        "--discover-voices",
+        action="store_true",
+        help="Explicitly request voice discovery for the selected provider, print results, and exit.",
+    )
     parser.add_argument("--resume", choices=["auto", "yes", "no"], default="auto")
     parser.add_argument("--provenance-enabled", action="store_true", help="Enable C2PA signing and embedding.")
     parser.add_argument("--provenance-cert-path", default="", help="Path to X.509 certificate for C2PA signing.")
@@ -735,6 +776,24 @@ def run_pipeline(
         )
     except NarratorProfileError as exc:
         raise InputValidationError(f"Invalid narrator profile: {exc}") from exc
+
+    disclosure_settings = GenerationSettings(
+        voice_mode="preset",
+        speaker="Eric",
+        instruct="Use a neutral, clear announcement voice with steady pacing.",
+        model_choice="1.7B",
+        device="auto",
+        precision="bf16",
+        language="English",
+        seed=268583702137267,
+        max_new_tokens=2048,
+        top_p=0.8,
+        top_k=20,
+        temperature=1.0,
+        repetition_penalty=1.05,
+        attention="sdpa",
+        unload_model_after_generate=False,
+    )
     default_policy = default_segment_policy(settings.voice_mode)
     try:
         segment_policy = SegmentPolicy(
@@ -749,78 +808,102 @@ def run_pipeline(
         )
     except ValueError as exc:
         raise InputValidationError(f"Invalid Qwen segment settings: {exc}") from exc
-    workflow_path = config.workflow_path_for(settings.voice_mode)
-    workflow_template = load_workflow_template(workflow_path)
-    narration_workflow_hash = sha256_file(workflow_path)
-    disclosure_workflow_path = config.workflow_path_for("preset")
-    disclosure_workflow_template = (
-        workflow_template
-        if disclosure_workflow_path == workflow_path
-        else load_workflow_template(disclosure_workflow_path)
-    )
-    disclosure_workflow_hash = sha256_file(disclosure_workflow_path)
-    workflow_hash = stable_settings_hash(
-        {
-            "narration_workflow_sha256": narration_workflow_hash,
-            "disclosure_workflow_sha256": disclosure_workflow_hash,
-        }
-    )
-    provenance_runtime_metadata = _extract_provenance_runtime_metadata(workflow_template, settings)
-    comfyui_client = build_comfyui_client(config)
+    workflow_template: dict | None = None
+    disclosure_workflow_template: dict | None = None
+    if config.tts.provider == "comfyui":
+        workflow_path = config.workflow_path_for(settings.voice_mode)
+        workflow_template = load_workflow_template(workflow_path)
+        narration_workflow_hash = sha256_file(workflow_path)
+        disclosure_workflow_path = config.workflow_path_for("preset")
+        disclosure_workflow_template = (
+            workflow_template
+            if disclosure_workflow_path == workflow_path
+            else load_workflow_template(disclosure_workflow_path)
+        )
+        disclosure_workflow_hash = sha256_file(disclosure_workflow_path)
+        # Preserve the exact v2 ComfyUI compatibility identity so existing
+        # incomplete default-provider checkpoints remain resumable.
+        workflow_hash = stable_settings_hash(
+            {
+                "narration_workflow_sha256": narration_workflow_hash,
+                "disclosure_workflow_sha256": disclosure_workflow_hash,
+            }
+        )
+
+    try:
+        speech_provider = build_speech_provider(
+            config=config,
+            narration_workflow=workflow_template,
+            disclosure_workflow=disclosure_workflow_template,
+            narration_settings=settings,
+            disclosure_settings=disclosure_settings,
+        )
+    except TTSClientError as exc:
+        raise InputValidationError(f"Invalid TTS provider configuration: {exc}") from exc
+    if config.tts.provider != "comfyui":
+        workflow_hash = stable_settings_hash(speech_provider.identity.compatibility)
+    provenance_runtime_metadata = _provider_provenance_runtime_metadata(speech_provider)
     checkpoint_store = CheckpointStore(state_dir=state_dir)
     plan_store = BookPlanStore(state_dir=state_dir)
     input_hash = sha256_file(input_book)
-    settings_hash = stable_settings_hash(
-        {
-            "source_mode": source_mode,
-            "source_parser_policy": EPUB_PARSER_POLICY_VERSION if source_mode == "epub" else "text-v1",
-            "pages_per_chapter": args.pages_per_chapter,
-            "target_words_per_chapter": args.target_words_per_chapter,
-            "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
-            "chapters_per_part": args.chapters_per_part,
-            "target_words_per_segment": segment_policy.target_words,
-            "max_words_per_segment": segment_policy.max_words,
-            "narrator_profile": narrator_profile.id,
-            "narrator_profile_sha256": narrator_profile.sha256,
-            "voice_mode": settings.voice_mode,
-            "speaker": settings.speaker,
-            "voice_instruct": settings.instruct,
-            "model_choice": settings.model_choice,
-            "device": settings.device,
-            "precision": settings.precision,
-            "language": settings.language,
-            "seed": settings.seed,
-            "max_new_tokens": settings.max_new_tokens,
-            "top_k": settings.top_k,
-            "temperature": settings.temperature,
-            "top_p": settings.top_p,
-            "repetition_penalty": settings.repetition_penalty,
-            "attention": settings.attention,
-            "unload_model_after_generate": settings.unload_model_after_generate,
-            "chapter_disclosure_policy": CHAPTER_DISCLOSURE_POLICY_VERSION,
-            "chapter_disclosure_text": CHAPTER_DISCLOSURE_TEXT,
-            "audio_assembly_policy": AUDIO_ASSEMBLY_POLICY_VERSION,
-            "ai_marking_schema": AI_MARKING_SCHEMA,
-            "disclosure_gap_ms": disclosure_gap_ms,
-            "segment_gap_ms": segment_gap_ms,
-            "chapter_gap_ms": chapter_gap_ms,
-            "output_format": args.output_format,
-            "watermark_device": args.watermark_device,
-            "fetch_metadata": args.fetch_metadata,
-            "gutenberg_id": args.gutenberg_id,
-            "title": args.title,
-            "author": args.author,
-            "comfyui_mode": args.comfyui_mode,
-            "comfyui_server_address": args.comfyui_server_address,
-            "comfyui_timeout_seconds": args.comfyui_timeout_seconds,
-            "provenance_enabled": args.provenance_enabled,
-            "provenance_cert_path": args.provenance_cert_path,
-            "provenance_key_path": args.provenance_key_path,
-            "provenance_failure_mode": args.provenance_failure_mode,
-            "provenance_tool": args.provenance_tool,
-            "provenance_claim_generator": args.provenance_claim_generator,
-        }
-    )
+    settings_identity = {
+        "source_mode": source_mode,
+        "source_parser_policy": EPUB_PARSER_POLICY_VERSION if source_mode == "epub" else "text-v1",
+        "pages_per_chapter": args.pages_per_chapter,
+        "target_words_per_chapter": args.target_words_per_chapter,
+        "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
+        "chapters_per_part": args.chapters_per_part,
+        "target_words_per_segment": segment_policy.target_words,
+        "max_words_per_segment": segment_policy.max_words,
+        "narrator_profile": narrator_profile.id,
+        "narrator_profile_sha256": narrator_profile.sha256,
+        "voice_mode": settings.voice_mode,
+        "speaker": settings.speaker,
+        "voice_instruct": settings.instruct,
+        "model_choice": settings.model_choice,
+        "device": settings.device,
+        "precision": settings.precision,
+        "language": settings.language,
+        "seed": settings.seed,
+        "max_new_tokens": settings.max_new_tokens,
+        "top_k": settings.top_k,
+        "temperature": settings.temperature,
+        "top_p": settings.top_p,
+        "repetition_penalty": settings.repetition_penalty,
+        "attention": settings.attention,
+        "unload_model_after_generate": settings.unload_model_after_generate,
+        "chapter_disclosure_policy": CHAPTER_DISCLOSURE_POLICY_VERSION,
+        "chapter_disclosure_text": CHAPTER_DISCLOSURE_TEXT,
+        "audio_assembly_policy": AUDIO_ASSEMBLY_POLICY_VERSION,
+        "ai_marking_schema": AI_MARKING_SCHEMA,
+        "disclosure_gap_ms": disclosure_gap_ms,
+        "segment_gap_ms": segment_gap_ms,
+        "chapter_gap_ms": chapter_gap_ms,
+        "output_format": args.output_format,
+        "watermark_device": args.watermark_device,
+        "fetch_metadata": args.fetch_metadata,
+        "gutenberg_id": args.gutenberg_id,
+        "title": args.title,
+        "author": args.author,
+        "comfyui_mode": args.comfyui_mode,
+        "comfyui_server_address": args.comfyui_server_address,
+        "comfyui_timeout_seconds": args.comfyui_timeout_seconds,
+        "provenance_enabled": args.provenance_enabled,
+        "provenance_cert_path": args.provenance_cert_path,
+        "provenance_key_path": args.provenance_key_path,
+        "provenance_failure_mode": args.provenance_failure_mode,
+        "provenance_tool": args.provenance_tool,
+        "provenance_claim_generator": args.provenance_claim_generator,
+    }
+    if config.tts.provider != "comfyui":
+        settings_identity.update(
+            {
+                "tts_provider": config.tts.provider,
+                "tts_provider_compatibility": speech_provider.identity.compatibility,
+                "tts_api_key_env": config.tts.api_key_env,
+            }
+        )
+    settings_hash = stable_settings_hash(settings_identity)
     checkpoint = None
     checkpoint_load_error: CheckpointError | None = None
     try:
@@ -966,6 +1049,13 @@ def run_pipeline(
                 "comfyui_server_address": args.comfyui_server_address,
                 "comfyui_timeout_seconds": args.comfyui_timeout_seconds,
                 "comfyui_spoof_scenario": args.comfyui_spoof_scenario,
+                "tts_provider": config.tts.provider,
+                "tts_base_url": config.tts.base_url,
+                "tts_api_key_env": config.tts.api_key_env,
+                "tts_model": config.tts.model,
+                "tts_voice": config.tts.voice,
+                "tts_response_format": config.tts.response_format,
+                "tts_language_code": config.tts.language_code,
                 "provenance_enabled": args.provenance_enabled,
                 "provenance_cert_path": args.provenance_cert_path,
                 "provenance_key_path": args.provenance_key_path,
@@ -1002,9 +1092,8 @@ def run_pipeline(
         progress.report("Preparing disclosure")
         disclosure_file = ensure_disclosure_asset(
             state_dir=state_dir,
-            workflow_template=disclosure_workflow_template,
             config=config,
-            comfyui_client=comfyui_client,
+            speech_provider=speech_provider,
             checkpoint=checkpoint,
             checkpoint_store=checkpoint_store,
             watermark_device=args.watermark_device,
@@ -1088,6 +1177,7 @@ def run_pipeline(
                         checkpoint_store=checkpoint_store,
                         config=config,
                         provenance_runtime_metadata=provenance_runtime_metadata,
+                        ai_provider=speech_provider.identity.provider_name,
                         logger=logger,
                         cancellation=cancellation,
                     )
@@ -1120,6 +1210,7 @@ def run_pipeline(
                         provenance_runtime_metadata,
                         logger,
                         cancellation,
+                        ai_provider=speech_provider.identity.provider_name,
                     )
                     progress.complete(ProgressTracker.part_key(part_index), "Part complete")
                     part_index += 1
@@ -1167,10 +1258,9 @@ def run_pipeline(
                 print(f"   -> Generating Segment {seg_idx + 1}/{len(chunks)}...", end="\r")
                 audio_data, _audio_ext = process_segment(
                     text_segment=chunk,
-                    workflow_template=workflow_template,
-                    settings=settings,
+                    speech_provider=speech_provider,
                     config=config,
-                    comfyui_client=comfyui_client,
+                    instructions=settings.instruct,
                     cancellation=cancellation,
                 )
                 if cancellation:
@@ -1187,6 +1277,7 @@ def run_pipeline(
                         output_path=temp_filename,
                         content_id=segment_content_id,
                         watermark_device=args.watermark_device,
+                        ai_provider=speech_provider.identity.provider_name,
                         logger=logger,
                     )
                     segment_files.append(temp_filename)
@@ -1208,8 +1299,8 @@ def run_pipeline(
                         total_segments=len(chunks),
                     )
                 else:
-                    raise ComfyUIProtocolError(
-                        f"Generated Segment {seg_idx + 1}/{len(chunks)} failed: ComfyUI returned invalid audio payload."
+                    raise TTSProtocolError(
+                        f"Generated Segment {seg_idx + 1}/{len(chunks)} failed: the TTS provider returned invalid audio."
                     )
 
             if not segment_files:
@@ -1235,6 +1326,7 @@ def run_pipeline(
                 content_id=f"{safe_title}_chapter_master",
                 watermarked_source_files=[disclosure_file, *segment_files],
                 logger=logger,
+                ai_provider=speech_provider.identity.provider_name,
             )
             checkpoint["artifacts"]["chapter_masters"][chapter_key] = _marked_artifact_record(
                 chapter_master,
@@ -1256,6 +1348,7 @@ def run_pipeline(
                 checkpoint_store=checkpoint_store,
                 config=config,
                 provenance_runtime_metadata=provenance_runtime_metadata,
+                ai_provider=speech_provider.identity.provider_name,
                 logger=logger,
                 cancellation=cancellation,
             )
@@ -1292,6 +1385,7 @@ def run_pipeline(
                     provenance_runtime_metadata,
                     logger,
                     cancellation,
+                    ai_provider=speech_provider.identity.provider_name,
                 )
                 progress.complete(ProgressTracker.part_key(part_index), "Part complete")
                 part_index += 1
@@ -1314,6 +1408,7 @@ def run_pipeline(
                 provenance_runtime_metadata,
                 logger,
                 cancellation,
+                ai_provider=speech_provider.identity.provider_name,
             )
             progress.complete(ProgressTracker.part_key(part_index), "Part complete")
         checkpoint["status"] = "completed"
@@ -1340,6 +1435,8 @@ def run_pipeline(
                 AudioStitchError,
                 ComfyUIConnectionError,
                 ComfyUIProtocolError,
+                TTSConnectionError,
+                TTSProtocolError,
                 PipelineRuntimeError,
             ),
         ):
@@ -1363,6 +1460,7 @@ def _publish_chapter_from_master(
     provenance_runtime_metadata: ProvenanceRuntimeMetadata,
     logger: logging.Logger,
     cancellation: CancellationToken | None = None,
+    ai_provider: str = "ComfyUI",
 ) -> None:
     chapter_meta = {
         "title": title,
@@ -1378,6 +1476,7 @@ def _publish_chapter_from_master(
         metadata=chapter_meta,
         cover_image=metadata.cover_image_path,
         logger=logger,
+        ai_provider=ai_provider,
     )
     if cancellation:
         cancellation.raise_if_cancelled()
@@ -1425,6 +1524,7 @@ def stitch_part(
     provenance_runtime_metadata: ProvenanceRuntimeMetadata,
     logger: logging.Logger,
     cancellation: CancellationToken | None = None,
+    ai_provider: str = "ComfyUI",
 ) -> None:
     safe_book_title = safe_filename_component(metadata.title, fallback="Untitled")
     part_filename = os.path.join(output_dir, f"{safe_book_title} - Part_{part_index:03d}.{output_format}")
@@ -1453,6 +1553,7 @@ def stitch_part(
         content_id=f"{safe_book_title}_part_{part_index:03d}_master",
         watermarked_source_files=chapter_master_files,
         logger=logger,
+        ai_provider=ai_provider,
     )
     checkpoint["artifacts"]["part_masters"][str(part_index)] = _marked_artifact_record(
         part_master,
@@ -1469,6 +1570,7 @@ def stitch_part(
         chapter_markers=chapter_markers,
         cover_image=metadata.cover_image_path,
         logger=logger,
+        ai_provider=ai_provider,
     )
     if cancellation:
         cancellation.raise_if_cancelled()
@@ -1519,6 +1621,15 @@ def build_app_config(args: argparse.Namespace, project_root: Path) -> AppConfig:
 
     return AppConfig(
         **kwargs,
+        tts=TTSConfig(
+            provider=getattr(args, "tts_provider", "comfyui"),
+            base_url=getattr(args, "tts_base_url", ""),
+            api_key_env=getattr(args, "tts_api_key_env", "AUTOAUDIO_TTS_API_KEY"),
+            model=getattr(args, "tts_model", ""),
+            voice=getattr(args, "tts_voice", ""),
+            response_format=getattr(args, "tts_response_format", ""),
+            language_code=getattr(args, "tts_language_code", ""),
+        ),
         provenance=ProvenanceConfig(
             enabled=args.provenance_enabled,
             cert_path=args.provenance_cert_path,
@@ -1549,7 +1660,26 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(launch_gui(project_root))
 
-    config = build_app_config(args, project_root)
+    try:
+        config = build_app_config(args, project_root)
+    except ValueError as exc:
+        print(f"ERROR: [INPUT_VALIDATION_ERROR] {exc}")
+        raise SystemExit(2)
+
+    if args.discover_voices:
+        try:
+            voices = discover_provider_voices(
+                config.tts,
+                timeout_seconds=config.comfyui_timeout_seconds,
+            )
+        except TTSClientError as exc:
+            print(f"ERROR: [TTS_VOICE_DISCOVERY_ERROR] {exc}")
+            raise SystemExit(2)
+        if not voices:
+            print("No eligible non-cloning voices were returned by the selected provider.")
+        for voice in voices:
+            print(f"{voice.id}\t{voice.display_name}")
+        return
     cancellation = CancellationToken()
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
@@ -1571,6 +1701,8 @@ def main(argv: list[str] | None = None) -> None:
         AudioStitchError,
         ComfyUIConnectionError,
         ComfyUIProtocolError,
+        TTSConnectionError,
+        TTSProtocolError,
         PipelineRuntimeError,
     ) as exc:
         print(f"ERROR: [{exc.guidance.code}] {exc}")

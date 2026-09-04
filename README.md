@@ -1,8 +1,8 @@
 # AutoAudio
 
-AutoAudio converts EPUB, TXT, Markdown, and RST books into chapter and part audiobook files using **ComfyUI + Qwen3-TTS**.
+AutoAudio converts EPUB, TXT, Markdown, and RST books into chapter and part audiobook files through a selectable text-to-speech provider. It supports **ComfyUI + Qwen3-TTS**, **OpenAI-compatible `/v1/audio/speech` endpoints**, and **ElevenLabs**.
 
-Version 2 is deliberately non-cloning: it supports Qwen built-in preset speakers and text-designed voices, but it never accepts reference-voice audio. Every narration segment receives a verified non-audible AudioSeal watermark, and an audible synthetic-audio disclosure is placed once at the beginning of each chapter.
+Version 2 is deliberately non-cloning: it uses built-in, text-designed, or already-existing provider voices, but it never accepts reference-voice audio or calls a voice-cloning API. Every narration segment receives a verified non-audible AudioSeal watermark, and an audible synthetic-audio disclosure is placed once at the beginning of each chapter.
 
 The current release candidate identifies itself as `2.0.0`:
 
@@ -14,6 +14,8 @@ autoaudio --version
 
 - Stable Qwen CustomVoice narration with nine bundled preset speakers.
 - Experimental VoiceDesign narration from a textual voice description.
+- Provider adapters for ComfyUI, OpenAI-compatible speech endpoints, and ElevenLabs existing voices.
+- Explicit, on-request voice discovery with no automatic endpoint probes.
 - EPUB parsing through MIT-licensed `pubparser` v0.1.1, including Project Gutenberg normalization.
 - FLAC, MP3, and M4B chapter and part outputs.
 - Lossless chapter assembly with configurable disclosure, segment, and chapter spacing.
@@ -29,10 +31,10 @@ autoaudio --version
 
 - Python 3.11 or newer
 - `ffmpeg` and `ffprobe` on `PATH`
-- A running ComfyUI server with compatible `FB_Qwen3TTSCustomVoice` and `FB_Qwen3TTSVoiceDesign` nodes
-- The appropriate Qwen3-TTS models available to those nodes
+- One configured TTS runtime: a compatible ComfyUI server, an OpenAI-compatible speech endpoint, or ElevenLabs
+- Provider credentials in an environment variable when the selected endpoint requires them
 
-See [Installation and ComfyUI setup](Docs/installation.md) for the full setup contract.
+See [Installation and provider setup](Docs/installation.md) and [TTS providers](Docs/tts-providers.md) for the full contracts.
 
 ## Quick start
 
@@ -60,6 +62,22 @@ autoaudio \
   --output-format m4b
 ```
 
+An OpenAI-compatible endpoint can be selected without changing the audiobook pipeline:
+
+```bash
+autoaudio \
+  --input-book /path/to/book.epub \
+  --output-dir /path/to/audiobook \
+  --tts-provider openai-compatible \
+  --tts-base-url https://api.openai.com/v1 \
+  --tts-api-key-env OPENAI_API_KEY \
+  --tts-model gpt-4o-mini-tts \
+  --tts-voice alloy \
+  --tts-response-format wav
+```
+
+Provider selection and editing are network-inert. Remote synthesis begins only after the user starts or resumes a conversion. ElevenLabs voice discovery runs only when **Discover voices** is pressed or `--discover-voices` is explicitly supplied; OpenAI-compatible voice IDs are entered manually.
+
 Launch the desktop GUI:
 
 ```bash
@@ -80,8 +98,8 @@ Preset speakers are the stable default for long-form work. VoiceDesign remains e
 
 ## Pause, cancel, and resume
 
-Use **Pause active** in the GUI or press `Ctrl+C` in the CLI. AutoAudio requests cancellation from the
-active ComfyUI prompt, stops at a safe file boundary, and preserves a resumable checkpoint. GUI jobs are
+Use **Pause active** in the GUI or press `Ctrl+C` in the CLI. AutoAudio requests cooperative cancellation,
+stops at a safe file boundary, and preserves a resumable checkpoint. GUI jobs are
 presented as paused; CLI interruption retains cancellation terminology and exit code 130.
 
 Resume with the same input, settings, workflows, plan, and output directory:
@@ -119,8 +137,9 @@ The command fails if a publishable artifact has missing AI metadata, missing or 
 
 ## Documentation
 
-- [Installation and ComfyUI setup](Docs/installation.md)
-- [Narrators and Qwen settings](Docs/narrators.md)
+- [Installation and provider setup](Docs/installation.md)
+- [TTS providers and explicit discovery](Docs/tts-providers.md)
+- [Narrators, voices, and Qwen settings](Docs/narrators.md)
 - [CLI reference](Docs/cli-reference.md)
 - [Resume, watermarking, and provenance](Docs/provenance-and-resume.md)
 - [Library jobs and Project Gutenberg acquisition](Docs/library-and-gutenberg.md)
