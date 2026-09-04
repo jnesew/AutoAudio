@@ -72,6 +72,8 @@ def test_packaging_contract_includes_runtime_packages_resources_and_notices():
         "LICENSES/*",
         "THIRD_PARTY_DEPENDENCIES.md",
     }
+    manifest = (PROJECT_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    assert "recursive-include examples *.json" in manifest
 
 
 def test_source_checkout_app_config_resolves_bundled_resources():

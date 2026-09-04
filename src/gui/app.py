@@ -63,6 +63,8 @@ def launch_gui(project_root: Path) -> int:
             QScrollArea,
             QSpinBox,
             QTabWidget,
+            QTableWidget,
+            QTableWidgetItem,
             QTextEdit,
             QTreeWidget,
             QTreeWidgetItem,
@@ -416,6 +418,48 @@ def launch_gui(project_root: Path) -> int:
             form.addRow("Maximum words per segment", self.max_words_per_segment_edit)
             layout.addWidget(planning)
 
+            narration_text = QGroupBox("Narration text")
+            narration_layout = QVBoxLayout(narration_text)
+            self.narrate_toc_checkbox = QCheckBox(
+                "Narrate confidently identified tables of contents"
+            )
+            self.narrate_toc_checkbox.setChecked(self.default_args.narrate_toc)
+            narration_layout.addWidget(self.narrate_toc_checkbox)
+
+            replacement_file_row = QHBoxLayout()
+            replacement_file_row.addWidget(QLabel("Global rules JSON"))
+            self.replacement_file_edit = QLineEdit(self.default_args.replacement_file)
+            replacement_file_button = QPushButton("Browse…")
+            replacement_file_button.clicked.connect(self._pick_replacement_file)
+            replacement_file_row.addWidget(self.replacement_file_edit, 1)
+            replacement_file_row.addWidget(replacement_file_button)
+            narration_layout.addLayout(replacement_file_row)
+
+            self.replacement_table = QTableWidget(0, 5)
+            self.replacement_table.setHorizontalHeaderLabels(
+                ("Source", "Spoken as", "Match", "Scope", "Case")
+            )
+            self.replacement_table.horizontalHeader().setStretchLastSection(True)
+            self.replacement_table.setMinimumHeight(170)
+            narration_layout.addWidget(self.replacement_table)
+
+            replacement_controls = QHBoxLayout()
+            add_replacement_button = QPushButton("Add replacement")
+            add_replacement_button.clicked.connect(lambda: self._add_replacement_row())
+            remove_replacement_button = QPushButton("Remove selected")
+            remove_replacement_button.clicked.connect(self._remove_selected_replacement_rows)
+            replacement_controls.addWidget(add_replacement_button)
+            replacement_controls.addWidget(remove_replacement_button)
+            replacement_controls.addStretch(1)
+            narration_layout.addLayout(replacement_controls)
+            replacement_help = QLabel(
+                "Rules are applied once to parsed narration before segmentation. "
+                "Whole-word matching is safest for numerals and abbreviations."
+            )
+            replacement_help.setWordWrap(True)
+            narration_layout.addWidget(replacement_help)
+            layout.addWidget(narration_text)
+
             metadata_options = QGroupBox("Metadata")
             metadata_form = QFormLayout(metadata_options)
             self.fetch_metadata_checkbox = QCheckBox("Fetch optional Gutenberg metadata")
@@ -552,6 +596,68 @@ def launch_gui(project_root: Path) -> int:
                 self.output_edit.setText(directory)
                 self._prepopulate_from_checkpoint()
 
+        def _pick_replacement_file(self) -> None:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select narration replacement rules",
+                self.replacement_file_edit.text() or str(self.project_root),
+                "JSON files (*.json);;All files (*.*)",
+            )
+            if file_path:
+                self.replacement_file_edit.setText(file_path)
+
+        def _add_replacement_row(self, rule: dict | None = None) -> None:
+            rule = rule or {}
+            row = self.replacement_table.rowCount()
+            self.replacement_table.insertRow(row)
+            self.replacement_table.setItem(row, 0, QTableWidgetItem(str(rule.get("source", ""))))
+            self.replacement_table.setItem(row, 1, QTableWidgetItem(str(rule.get("spoken", ""))))
+            match_combo = combo(("whole-word", "literal", "regex"), str(rule.get("match", "whole-word")))
+            scope_combo = combo(("body", "title", "all"), str(rule.get("scope", "body")))
+            case_combo = combo(
+                ("sensitive", "insensitive"),
+                "sensitive" if bool(rule.get("case_sensitive", True)) else "insensitive",
+            )
+            self.replacement_table.setCellWidget(row, 2, match_combo)
+            self.replacement_table.setCellWidget(row, 3, scope_combo)
+            self.replacement_table.setCellWidget(row, 4, case_combo)
+
+        def _remove_selected_replacement_rows(self) -> None:
+            rows = sorted({index.row() for index in self.replacement_table.selectedIndexes()}, reverse=True)
+            for row in rows:
+                self.replacement_table.removeRow(row)
+
+        def _collect_replacement_rules(self) -> list[dict]:
+            rules: list[dict] = []
+            for row in range(self.replacement_table.rowCount()):
+                source_item = self.replacement_table.item(row, 0)
+                spoken_item = self.replacement_table.item(row, 1)
+                source = source_item.text() if source_item is not None else ""
+                spoken = spoken_item.text() if spoken_item is not None else ""
+                if not source and not spoken:
+                    continue
+                match_combo = self.replacement_table.cellWidget(row, 2)
+                scope_combo = self.replacement_table.cellWidget(row, 3)
+                case_combo = self.replacement_table.cellWidget(row, 4)
+                rules.append(
+                    {
+                        "source": source,
+                        "spoken": spoken,
+                        "match": match_combo.currentText(),
+                        "scope": scope_combo.currentText(),
+                        "case_sensitive": case_combo.currentText() == "sensitive",
+                    }
+                )
+            return rules
+
+        def _restore_replacement_rules(self, rules) -> None:
+            self.replacement_table.setRowCount(0)
+            if not isinstance(rules, list):
+                return
+            for rule in rules:
+                if isinstance(rule, dict):
+                    self._add_replacement_row(rule)
+
         def _pick_books_dir(self) -> None:
             directory = QFileDialog.getExistingDirectory(
                 self,
@@ -649,6 +755,7 @@ def launch_gui(project_root: Path) -> int:
             self.gutenberg_id_edit.clear()
             self.title_edit.clear()
             self.author_edit.clear()
+            self.replacement_table.setRowCount(0)
             self._prepopulate_from_checkpoint()
             self._on_input_changed(str(entry.source_path))
             self._refresh_action_controls()
@@ -968,6 +1075,9 @@ def launch_gui(project_root: Path) -> int:
             args.max_words_per_segment = self._optional_int(
                 self.max_words_per_segment_edit.text(), "Maximum words per segment"
             )
+            args.narrate_toc = self.narrate_toc_checkbox.isChecked()
+            args.replacement_file = self.replacement_file_edit.text().strip()
+            args.replacement_rules = self._collect_replacement_rules()
             args.disclosure_gap_ms = self.disclosure_gap_spin.value()
             args.segment_gap_ms = self.segment_gap_spin.value()
             args.chapter_gap_ms = self.chapter_gap_spin.value()
@@ -1225,6 +1335,7 @@ def launch_gui(project_root: Path) -> int:
             for widget, key in (
                 (self.target_words_per_segment_edit, "target_words_per_segment"),
                 (self.max_words_per_segment_edit, "max_words_per_segment"),
+                (self.replacement_file_edit, "replacement_file"),
                 (self.voice_instruct_edit, "voice_instruct"),
                 (self.device_edit, "device"),
                 (self.precision_edit, "precision"),
@@ -1242,6 +1353,10 @@ def launch_gui(project_root: Path) -> int:
             ):
                 self._restore_text(widget, state, key)
             self.fetch_metadata_checkbox.setChecked(bool_from_ui_state(state.get("fetch_metadata"), default=False))
+            self.narrate_toc_checkbox.setChecked(
+                bool_from_ui_state(state.get("narrate_toc"), default=False)
+            )
+            self._restore_replacement_rules(state.get("replacement_rules"))
             self.unload_model_checkbox.setChecked(
                 bool_from_ui_state(state.get("unload_model_after_generate"), default=False)
             )

@@ -87,3 +87,6 @@ Canceled, failed, and interrupted jobs remain resumable. Completed jobs are not 
 The GUI presents a cooperatively canceled job as **Paused** and its Resume action uses the same compatibility
 checks as `--resume yes`. Pending queue entries are session-local; once a job begins, its state is persisted in
 its per-title checkpoint.
+
+TOC narration policy and the normalized replacement-rule list are included in the settings compatibility
+hash. Changing either rebuilds the BookPlan rather than reusing segments generated from different spoken text.

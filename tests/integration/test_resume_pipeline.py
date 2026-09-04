@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ if "websocket" not in sys.modules:
 
 from core.checkpoint import CheckpointStore
 from core.config import AppConfig
+from core.errors import ResumeStateError
 from core.pipeline import run_pipeline
 from provenance.ai_marking import write_ai_marking_manifest
 
@@ -39,6 +41,9 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             chapters_per_part=10,
             target_words_per_segment=4,
             max_words_per_segment=4,
+            narrate_toc=False,
+            replacement_file="",
+            replacement_rules=[],
             disclosure_gap_ms=700,
             segment_gap_ms=150,
             chapter_gap_ms=1000,
@@ -84,6 +89,16 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             # Enough text to create multiple segments with a four-word hard limit.
             input_book.write_text(
                 "one two three four. five six seven eight. nine ten eleven twelve.", encoding="utf-8"
+            )
+            replacement_file = tmp / "replacements.json"
+            replacement_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "replacements": [{"source": "five", "spoken": "fife"}],
+                    }
+                ),
+                encoding="utf-8",
             )
             output_dir = tmp / "output"
             project_root = tmp / "project"
@@ -146,6 +161,8 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 raise RuntimeError("spoofed interruption")
 
             first_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="auto")
+            first_args.replacement_file = str(replacement_file)
+            first_args.replacement_rules = ["one=won"]
             def fake_encode(command, **kwargs):
                 del kwargs
                 Path(command[-1]).write_bytes(b"encoded-audio")
@@ -166,6 +183,37 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     run_pipeline(first_args, config)
 
+            checkpoint_store = CheckpointStore(output_dir / ".autoaudio_state")
+            interrupted_checkpoint = checkpoint_store.load()
+            self.assertEqual(
+                interrupted_checkpoint["ui_state"]["replacement_rules"],
+                [
+                    {
+                        "source": "one",
+                        "spoken": "won",
+                        "match": "whole-word",
+                        "scope": "body",
+                        "case_sensitive": True,
+                    }
+                ],
+            )
+            plan_payload = json.loads(
+                (output_dir / ".autoaudio_state" / "book_plan.json").read_text(encoding="utf-8")
+            )
+            planned_text = " ".join(
+                segment["text"]
+                for chapter in plan_payload["chapters"]
+                for segment in chapter["segments"]
+            )
+            self.assertIn("won", planned_text)
+            self.assertIn("fife", planned_text)
+
+            incompatible_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="yes")
+            incompatible_args.replacement_file = str(replacement_file)
+            incompatible_args.replacement_rules = ["one=oneword"]
+            with self.assertRaisesRegex(ResumeStateError, "no compatible checkpoint state exists"):
+                run_pipeline(incompatible_args, config)
+
             second_call_count = {"n": 0}
 
             def normal_process_segment(**kwargs):
@@ -174,6 +222,8 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
                 return (b"RIFF....FAKEAUDIO-2", ".flac")
 
             second_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="yes")
+            second_args.replacement_file = str(replacement_file)
+            second_args.replacement_rules = ["one=won"]
             progress_updates = []
             with patch("core.pipeline.assemble_lossless_master", side_effect=fake_assemble), patch(
                 "core.pipeline.encode_lossless_master", side_effect=fake_final_encode
@@ -214,13 +264,14 @@ class ResumePipelineIntegrationTests(unittest.TestCase):
             self.assertFalse(list((output_dir / ".autoaudio_state" / "masters").glob("*")))
 
             # A failure after a completed part may resume without its intentionally cleaned chapter masters.
-            checkpoint_store = CheckpointStore(output_dir / ".autoaudio_state")
             completed_checkpoint = checkpoint_store.load()
             self.assertFalse(completed_checkpoint["artifacts"]["chapter_masters"])
             self.assertFalse(completed_checkpoint["artifacts"]["part_masters"])
             completed_checkpoint["status"] = "failed"
             checkpoint_store.save(completed_checkpoint)
             third_args = self._build_args(input_book=input_book, output_dir=output_dir, resume="yes")
+            third_args.replacement_file = str(replacement_file)
+            third_args.replacement_rules = ["one=won"]
             with patch(
                 "core.pipeline.process_segment", side_effect=AssertionError("completed part regenerated narration")
             ), patch(

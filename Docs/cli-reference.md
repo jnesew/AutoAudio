@@ -20,6 +20,12 @@ Source checkouts may equivalently use `python auto_audiobook.py`.
 
 EPUB parsing is offline. AutoAudio reads publication spine order, extracts metadata and cover data in the same parse, and removes recognized Project Gutenberg distribution material before freezing the BookPlan. Online metadata lookup is separate and optional.
 
+- `--narrate-toc` / `--no-narrate-toc`: include or omit confidently identified tables of contents. Omission is the default.
+- `--replacement-file <json>`: shared narration replacement rule list.
+- `--replacement-rule SOURCE=SPOKEN`: repeatable whole-word body replacement. A JSON object enables advanced fields.
+
+See [Narration text preparation](narration-text.md) for rule schema, matching behavior, and TOC confidence policy.
+
 ## Narration and segmentation
 
 - `--narrator-profile <id>`: bundled profile ID.

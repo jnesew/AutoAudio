@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "replacements": [
+    {
+      "source": "IV",
+      "spoken": "four",
+      "match": "whole-word",
+      "scope": "body",
+      "case_sensitive": true
+    },
+    {
+      "source": "Dr.",
+      "spoken": "Doctor",
+      "match": "literal",
+      "scope": "all",
+      "case_sensitive": false
+    }
+  ]
+}

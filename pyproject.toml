@@ -24,7 +24,7 @@ classifiers = [
   "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 dependencies = [
-  "pubparser @ git+https://github.com/jnesew/pubparser.git@60bfedfe8d9d716a22016a0fe63e7b015f50ba1d",
+  "pubparser @ git+https://github.com/jnesew/pubparser.git@2e6c83a9ea33fef0c9bc4f46ef3708f3cee0d117",
   "websocket-client>=1.8",
   "PySide6>=6.7",
   "numpy",

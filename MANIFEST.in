@@ -2,6 +2,7 @@ include auto_audiobook.py
 include requirements.txt
 include THIRD_PARTY_DEPENDENCIES.md
 recursive-include Docs *.md
+recursive-include examples *.json
 recursive-include LICENSES *
 recursive-include resources *.json
 recursive-include scripts *.py
