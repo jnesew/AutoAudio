@@ -1,4 +1,12 @@
-# Narrators and Qwen settings
+# Narrators, voices, and Qwen settings
+
+## Provider voice selection
+
+ComfyUI uses the bundled narrator profiles described below. OpenAI-compatible and ElevenLabs adapters instead use an existing endpoint voice ID supplied in **Endpoint voice id** or `--tts-voice`.
+
+For OpenAI-compatible synthesis, AutoAudio sends the selected profile's voice/style instruction when the endpoint supports the standard `instructions` field. ElevenLabs synthesis sends text, model ID, and optional language code; it does not call voice creation or cloning APIs.
+
+ElevenLabs discovery is an explicit convenience action. Returned `cloned` and `professional` categories are excluded, leaving only `premade` and `generated` voices. No provider is queried merely because its configuration is selected or restored.
 
 ## Narrator modes
 
@@ -47,7 +55,7 @@ The GUI applies a profile and then allows supported overrides:
 - Attention implementation
 - Model unload policy
 
-Changing any synthesis-affecting value changes checkpoint compatibility. A prior job can resume only when its effective narrator settings and workflow bytes still match.
+Changing any synthesis-affecting value changes checkpoint compatibility. A prior ComfyUI job can resume only when its effective narrator settings and workflow bytes still match. HTTP-provider resume identity includes the adapter, endpoint, model, voice, response format, and language code.
 
 For reliable long-form output:
 

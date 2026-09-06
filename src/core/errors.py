@@ -68,10 +68,26 @@ class ComfyUIProtocolError(AutoAudioError):
     )
 
 
+class TTSConnectionError(AutoAudioError):
+    guidance = ErrorGuidance(
+        code="TTS_CONNECTION_ERROR",
+        remediation="Check the selected TTS provider, endpoint, API-key environment variable, and network connection.",
+        exit_code=6,
+    )
+
+
+class TTSProtocolError(AutoAudioError):
+    guidance = ErrorGuidance(
+        code="TTS_PROTOCOL_ERROR",
+        remediation="Check the selected provider's model, voice, response format, and API compatibility.",
+        exit_code=7,
+    )
+
+
 class PipelineRuntimeError(AutoAudioError):
     guidance = ErrorGuidance(
         code="PIPELINE_RUNTIME_ERROR",
-        remediation="Inspect the run log and retry with smaller chunks or --comfyui-mode spoof.",
+        remediation="Inspect the run log and retry with smaller chunks or the local spoof provider mode.",
         exit_code=8,
     )
 

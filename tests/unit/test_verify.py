@@ -13,7 +13,7 @@ from provenance.ai_marking import AI_MARKING_COMMENT, write_ai_marking_manifest
 from provenance.verify import AI_TAGS, _iter_audio_files, verify_artifact
 
 
-def _marked_artifact(path: Path) -> Path:
+def _marked_artifact(path: Path, *, provider: str = "ComfyUI") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"audio-container")
     write_ai_marking_manifest(
@@ -23,13 +23,25 @@ def _marked_artifact(path: Path) -> Path:
         watermark_applied=True,
         watermark_verified=True,
         watermark_detail="test",
+        provider=provider,
     )
     return path
 
 
 def test_verifier_accepts_matching_final_hash_and_tags(tmp_path):
     artifact = _marked_artifact(tmp_path / "Chapter_001.flac")
-    tags = {**AI_TAGS, "ai_marking": "audio_watermark+metadata+manifest"}
+    tags = {**AI_TAGS, "ai_provider": "ComfyUI", "ai_marking": "audio_watermark+metadata+manifest"}
+
+    with patch("provenance.verify._probe_tags", return_value=tags):
+        ok, errors = verify_artifact(artifact)
+
+    assert ok is True
+    assert errors == []
+
+
+def test_verifier_uses_the_manifest_provider_for_dynamic_tags(tmp_path):
+    artifact = _marked_artifact(tmp_path / "Chapter_001.flac", provider="ElevenLabs")
+    tags = {**AI_TAGS, "ai_provider": "ElevenLabs", "ai_marking": "audio_watermark+metadata+manifest"}
 
     with patch("provenance.verify._probe_tags", return_value=tags):
         ok, errors = verify_artifact(artifact)
@@ -51,7 +63,7 @@ def test_verifier_accepts_portable_comment_marking(tmp_path):
 def test_verifier_rejects_artifact_mutated_after_sidecar_hash(tmp_path):
     artifact = _marked_artifact(tmp_path / "Chapter_001.flac")
     artifact.write_bytes(b"mutated-after-sidecar")
-    tags = {**AI_TAGS, "ai_marking": "audio_watermark+metadata+manifest"}
+    tags = {**AI_TAGS, "ai_provider": "ComfyUI", "ai_marking": "audio_watermark+metadata+manifest"}
 
     with patch("provenance.verify._probe_tags", return_value=tags):
         ok, errors = verify_artifact(artifact)

@@ -95,6 +95,24 @@ def test_gui_source_contains_no_reference_voice_picker():
     assert "reference voice" not in source
 
 
+def test_voice_discovery_is_bound_only_to_the_explicit_button():
+    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+
+    assert "self.voice_discovery_button.clicked.connect(self._discover_voices)" in source
+    assert "self.tts_provider_combo.currentIndexChanged.connect(self._on_tts_provider_changed)" in source
+    assert "currentIndexChanged.connect(self._discover_voices)" not in source
+    assert "provider changes must never contact an endpoint" in source
+
+
+def test_cli_voice_discovery_requires_an_explicit_flag():
+    parser = build_argument_parser(PROJECT_ROOT)
+
+    assert parser.parse_args([]).discover_voices is False
+    assert parser.parse_args(["--discover-voices"]).discover_voices is True
+    assert parser.parse_args(["--tts-timeout-seconds", "4.5"]).comfyui_timeout_seconds == 4.5
+    assert parser.parse_args(["--comfyui-timeout-seconds", "4.5"]).comfyui_timeout_seconds == 4.5
+
+
 def test_gui_uses_dropdowns_for_bundled_speaker_and_model_choices():
     source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
 

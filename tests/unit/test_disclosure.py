@@ -11,15 +11,24 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from comfyui.client import AudioArtifact
 from core.checkpoint import CheckpointStore
-from core.config import AppConfig, GenerationSettings
+from core.config import AppConfig
 from core.pipeline import CHAPTER_DISCLOSURE_TEXT, ensure_disclosure_asset, process_segment
+from tts import AudioArtifact, ProviderIdentity
 
 
-class RecordingClient:
+class RecordingProvider:
     def __init__(self):
         self.calls = []
+        self.identity = ProviderIdentity(
+            provider_id="test",
+            provider_name="Test TTS",
+            model_name="test-model",
+            model_version="test",
+            backend_name="test-backend",
+            backend_version="test",
+            compatibility={},
+        )
 
     def generate_audio(self, **kwargs):
         self.calls.append(kwargs)
@@ -27,25 +36,24 @@ class RecordingClient:
 
 
 def test_process_segment_sends_only_narration_text(tmp_path):
-    client = RecordingClient()
+    provider = RecordingProvider()
 
     process_segment(
         text_segment="Narration begins here.",
-        workflow_template={},
-        settings=GenerationSettings(),
+        speech_provider=provider,
         config=AppConfig(project_root=tmp_path, comfyui_mode="spoof"),
-        comfyui_client=client,
     )
 
-    assert client.calls[0]["text_segment"] == "Narration begins here."
-    assert CHAPTER_DISCLOSURE_TEXT not in client.calls[0]["text_segment"]
+    assert provider.calls[0]["text_segment"] == "Narration begins here."
+    assert provider.calls[0]["purpose"] == "narration"
+    assert CHAPTER_DISCLOSURE_TEXT not in provider.calls[0]["text_segment"]
 
 
 def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_path):
     state_dir = tmp_path / ".autoaudio_state"
     store = CheckpointStore(state_dir)
     checkpoint = {"version": 2, "artifacts": {}}
-    client = RecordingClient()
+    provider = RecordingProvider()
     marking = SimpleNamespace(applied=True, verified=True, detail="verified")
 
     def fake_encode(command, **kwargs):
@@ -55,9 +63,8 @@ def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_pat
 
     call_args = {
         "state_dir": state_dir,
-        "workflow_template": {},
         "config": AppConfig(project_root=tmp_path, comfyui_mode="spoof"),
-        "comfyui_client": client,
+        "speech_provider": provider,
         "checkpoint": checkpoint,
         "checkpoint_store": store,
         "watermark_device": "cpu",
@@ -72,9 +79,9 @@ def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_pat
         second = ensure_disclosure_asset(**call_args)
 
     assert first == second
-    assert len(client.calls) == 1
-    assert client.calls[0]["text_segment"] == CHAPTER_DISCLOSURE_TEXT
-    assert client.calls[0]["settings"].voice_mode == "preset"
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["text_segment"] == CHAPTER_DISCLOSURE_TEXT
+    assert provider.calls[0]["purpose"] == "disclosure"
     assert watermark.call_args.kwargs["device"] == "cpu"
     assert checkpoint["artifacts"]["disclosure"]["policy_version"] == "chapter-disclosure-v1"
     assert Path(checkpoint["artifacts"]["disclosure"]["manifest_path"]).exists()

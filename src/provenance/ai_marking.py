@@ -14,6 +14,10 @@ from core.checkpoint import sha256_file
 AI_MARKING_SCHEMA = "autoaudio.ai_marking.v2"
 AI_MARKING_COMMENT = (
     "AutoAudio AI marking: ai_generated=true; ai_system=AutoAudio; "
+    "ai_marking=audio_watermark+metadata+manifest"
+)
+LEGACY_COMFYUI_AI_MARKING_COMMENT = (
+    "AutoAudio AI marking: ai_generated=true; ai_system=AutoAudio; "
     "ai_provider=ComfyUI; ai_marking=audio_watermark+metadata+manifest"
 )
 
@@ -26,14 +30,14 @@ class WatermarkEvidence:
     sources: tuple["WatermarkEvidence", ...] = ()
 
 
-def ai_marking_metadata_args() -> list[str]:
+def ai_marking_metadata_args(*, provider: str = "ComfyUI") -> list[str]:
     return [
         "-metadata",
         "ai_generated=true",
         "-metadata",
         "ai_system=AutoAudio",
         "-metadata",
-        "ai_provider=ComfyUI",
+        f"ai_provider={provider}",
         "-metadata",
         "ai_marking=audio_watermark+metadata+manifest",
     ]
@@ -72,6 +76,7 @@ def write_ai_marking_manifest(
     watermark_applied: bool,
     watermark_verified: bool,
     watermark_detail: str,
+    provider: str = "ComfyUI",
     watermark_scope: str = "direct",
     source_artifacts: Iterable[WatermarkEvidence] = (),
 ) -> Path:
@@ -84,7 +89,7 @@ def write_ai_marking_manifest(
         "artifact_hash_scope": "entire-artifact-bytes",
         "ai_generated": True,
         "ai_system": "AutoAudio",
-        "provider": "ComfyUI",
+        "provider": provider,
         "content_id": content_id,
         "marking_methods": {
             "metadata": metadata_embedded,

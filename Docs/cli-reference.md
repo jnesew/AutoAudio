@@ -20,6 +20,20 @@ Source checkouts may equivalently use `python auto_audiobook.py`.
 
 EPUB parsing is offline. AutoAudio reads publication spine order, extracts metadata and cover data in the same parse, and removes recognized Project Gutenberg distribution material before freezing the BookPlan. Online metadata lookup is separate and optional.
 
+## TTS provider
+
+- `--tts-provider {comfyui,openai-compatible,elevenlabs}`: adapter used for synthesis. The default remains `comfyui`.
+- `--tts-base-url <url>`: provider root URL. Blank uses the adapter default.
+- `--tts-api-key-env <name>`: environment variable containing the API key. AutoAudio stores the variable name, never its value.
+- `--tts-model <id>`: required for OpenAI-compatible endpoints; optional for ElevenLabs, which defaults to `eleven_multilingual_v2`.
+- `--tts-voice <id>`: existing provider voice ID. Required for both HTTP adapters.
+- `--tts-response-format <value>`: provider response format. Use a self-describing format such as WAV, MP3, FLAC, or Opus; raw PCM and μ-law are rejected.
+- `--tts-language-code <code>`: optional ElevenLabs language code.
+- `--tts-timeout-seconds <float>`: synthesis or explicit-discovery timeout. `--comfyui-timeout-seconds` remains a compatibility alias.
+- `--discover-voices`: explicitly request eligible voices for the selected provider, print them, and exit without converting a book.
+
+Changing provider settings does not contact an endpoint. Voice discovery occurs only with `--discover-voices`; synthesis occurs only as part of a user-started conversion. OpenAI-compatible speech APIs do not define a standard voice-list endpoint, so those voice IDs are entered manually. See [TTS providers](tts-providers.md).
+
 ## Narration and segmentation
 
 - `--narrator-profile <id>`: bundled profile ID.
@@ -61,11 +75,11 @@ An explicit `cpu` or `cuda` selection never changes devices silently. On AMD ROC
 
 Metadata precedence is user override, embedded source metadata, fetched metadata, then fallback defaults.
 
-## ComfyUI runtime
+## ComfyUI-specific runtime
 
 - `--comfyui-mode {network,spoof}`
 - `--comfyui-server-address <host:port>`
-- `--comfyui-timeout-seconds <float>`
+- `--comfyui-timeout-seconds <float>`: compatibility alias for `--tts-timeout-seconds`.
 - `--comfyui-spoof-scenario {success,timeout,malformed_history,missing_view_payload,connection_error}`
 
 ## Resume and application mode
