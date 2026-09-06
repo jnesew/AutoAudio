@@ -979,7 +979,7 @@ This table records one development-environment resolution. It is not a dependenc
 |                  |         |                                                         |     Lesser General Public License for more details.                                 |
 |                  |         |                                                         |     https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html                         |
 |                  |         |                                                         |                                                                                     |
-| pubparser        | 0.1.0.dev0 | MIT License                                          | MIT License                                                                         |
+| pubparser        | 0.2.0.dev0 | MIT License                                          | MIT License                                                                         |
 |                  |         |                                                         |                                                                                     |
 |                  |         |                                                         | Copyright (c) 2026 pubparser contributors                                           |
 |                  |         |                                                         |                                                                                     |

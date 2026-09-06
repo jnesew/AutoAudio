@@ -60,6 +60,14 @@ from core.filenames import safe_filename_component
 from core.logging_utils import configure_run_logger
 from core.metadata_adapters import adapter_for_extension
 from core.narrator import NarratorCatalog, NarratorProfileError
+from core.narration_text import (
+    NARRATION_TEXT_POLICY_VERSION,
+    ReplacementRuleError,
+    apply_rules_to_chapters,
+    high_confidence_plain_text_toc_indexes,
+    load_replacement_rules,
+    replacement_rules_payload,
+)
 from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
 from core.progress import ProgressTracker, ProgressUpdate
 from core.segmentation import SegmentPolicy, default_segment_policy, segment_text_for_qwen
@@ -111,36 +119,52 @@ DEFAULT_SEGMENT_GAP_MS = 150
 DEFAULT_CHAPTER_GAP_MS = 1000
 
 
-def extract_text_blocks_from_epub(epub_path: str) -> list[tuple[str, str]]:
+def extract_text_blocks_from_epub(epub_path: str, *, narrate_toc: bool = False) -> list[tuple[str, str]]:
     if not os.path.exists(epub_path):
         print(f"ERROR: File not found: {epub_path}")
         return []
 
-    return list(parse_epub(epub_path).text_blocks)
+    return list(parse_epub(epub_path, narrate_toc=narrate_toc).text_blocks)
 
 
-def extract_text_blocks_from_text_file(text_path: str) -> list[tuple[str, str]]:
+def extract_text_blocks_from_text_file(
+    text_path: str,
+    *,
+    narrate_toc: bool = False,
+) -> list[tuple[str, str]]:
+    blocks, _omitted_toc_paragraphs = _extract_text_blocks_with_toc_info(
+        text_path,
+        narrate_toc=narrate_toc,
+    )
+    return blocks
+
+
+def _extract_text_blocks_with_toc_info(
+    text_path: str,
+    *,
+    narrate_toc: bool = False,
+) -> tuple[list[tuple[str, str]], int]:
     if not os.path.exists(text_path):
         print(f"ERROR: File not found: {text_path}")
-        return []
+        return [], 0
 
     with open(text_path, "r", encoding="utf-8", errors="ignore") as file:
         raw = file.read()
 
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
 
-    paragraphs = [
-        re.sub(r"\s+", " ", paragraph).strip()
-        for paragraph in re.split(r"\n\s*\n+", raw)
-        if paragraph.strip()
-    ]
+    raw_paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n+", raw) if paragraph.strip()]
+    toc_indexes = frozenset() if narrate_toc else high_confidence_plain_text_toc_indexes(raw_paragraphs)
+    paragraphs = [re.sub(r"\s+", " ", paragraph).strip() for paragraph in raw_paragraphs]
 
     blocks: list[tuple[str, str]] = []
     for i, paragraph in enumerate(paragraphs):
+        if i in toc_indexes:
+            continue
         if len(paragraph) > 20:
             blocks.append((f"Paragraph {i + 1}", paragraph))
 
-    return blocks
+    return blocks, len(toc_indexes)
 
 
 def group_blocks_into_chapters(blocks: list[tuple[str, str]], pages_per_chapter: int) -> list[tuple[str, str]]:
@@ -607,6 +631,25 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     parser.add_argument("--target-words-per-segment", type=int, default=None)
     parser.add_argument("--max-words-per-segment", type=int, default=None)
     parser.add_argument(
+        "--narrate-toc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Narrate confidently identified table-of-contents documents/blocks (disabled by default).",
+    )
+    parser.add_argument(
+        "--replacement-file",
+        default="",
+        help="JSON file containing global narration replacement rules.",
+    )
+    parser.add_argument(
+        "--replacement-rule",
+        dest="replacement_rules",
+        action="append",
+        default=[],
+        metavar="SOURCE=SPOKEN",
+        help="Add a whole-word, case-sensitive body replacement; JSON objects support advanced fields.",
+    )
+    parser.add_argument(
         "--disclosure-gap-ms",
         type=int,
         default=DEFAULT_DISCLOSURE_GAP_MS,
@@ -756,6 +799,17 @@ def run_pipeline(
         raise InputValidationError(str(exc)) from exc
 
     try:
+        raw_inline_replacement_rules = tuple(getattr(args, "replacement_rules", ()) or ())
+        inline_replacement_rules = load_replacement_rules(None, raw_inline_replacement_rules)
+        replacement_rules = load_replacement_rules(
+            getattr(args, "replacement_file", ""),
+            raw_inline_replacement_rules,
+        )
+    except ReplacementRuleError as exc:
+        raise InputValidationError(f"Invalid narration replacement configuration: {exc}") from exc
+    narrate_toc = bool(getattr(args, "narrate_toc", False))
+
+    try:
         narrator_catalog = NarratorCatalog.load(config.narrator_profiles_path)
         narrator_profile = narrator_catalog.get(args.narrator_profile)
         settings = narrator_profile.with_overrides(
@@ -849,6 +903,9 @@ def run_pipeline(
     settings_identity = {
         "source_mode": source_mode,
         "source_parser_policy": EPUB_PARSER_POLICY_VERSION if source_mode == "epub" else "text-v1",
+        "narration_text_policy": NARRATION_TEXT_POLICY_VERSION,
+        "narrate_toc": narrate_toc,
+        "replacement_rules": replacement_rules_payload(replacement_rules),
         "pages_per_chapter": args.pages_per_chapter,
         "target_words_per_chapter": args.target_words_per_chapter,
         "min_paragraphs_per_chapter": args.min_paragraphs_per_chapter,
@@ -946,7 +1003,7 @@ def run_pipeline(
     parsed_epub: ParsedEpub | None = None
     if source_mode == "epub":
         try:
-            parsed_epub = parse_epub(input_book)
+            parsed_epub = parse_epub(input_book, narrate_toc=narrate_toc)
         except EpubParseError as exc:
             raise InputValidationError(str(exc)) from exc
         for diagnostic in parsed_epub.diagnostics:
@@ -961,6 +1018,12 @@ def run_pipeline(
             logger.info(
                 "Project Gutenberg source detected; boilerplate normalization changed=%s",
                 parsed_epub.gutenberg_changed,
+            )
+        if parsed_epub.omitted_toc_documents:
+            logger.info(
+                "Omitted %d confidently identified table-of-contents document(s): %s",
+                len(parsed_epub.omitted_toc_documents),
+                ", ".join(parsed_epub.omitted_toc_documents),
             )
 
     if book_plan is not None:
@@ -984,12 +1047,24 @@ def run_pipeline(
             blocks = list(parsed_epub.text_blocks)
             chapters = group_blocks_into_chapters(blocks, args.pages_per_chapter)
         else:
-            blocks = extract_text_blocks_from_text_file(input_book)
+            blocks, omitted_toc_paragraphs = _extract_text_blocks_with_toc_info(
+                input_book,
+                narrate_toc=narrate_toc,
+            )
+            if omitted_toc_paragraphs:
+                logger.info(
+                    "Omitted %d high-confidence plain-text table-of-contents paragraph(s).",
+                    omitted_toc_paragraphs,
+                )
             chapters = group_paragraphs_into_chapters(
                 blocks,
                 target_words_per_chapter=args.target_words_per_chapter,
                 min_paragraphs_per_chapter=args.min_paragraphs_per_chapter,
             )
+
+        chapters, replacement_count = apply_rules_to_chapters(chapters, replacement_rules)
+        if replacement_count:
+            logger.info("Applied %d narration text replacement(s) before segmentation.", replacement_count)
 
         if not chapters:
             raise InputValidationError("No chapters found. Check the input file content/format and chapter grouping settings.")
@@ -1021,6 +1096,9 @@ def run_pipeline(
                 "chapters_per_part": args.chapters_per_part,
                 "target_words_per_segment": segment_policy.target_words,
                 "max_words_per_segment": segment_policy.max_words,
+                "narrate_toc": narrate_toc,
+                "replacement_file": getattr(args, "replacement_file", ""),
+                "replacement_rules": replacement_rules_payload(inline_replacement_rules),
                 "narrator_profile": narrator_profile.id,
                 "speaker": settings.speaker,
                 "voice_instruct": settings.instruct,

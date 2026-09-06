@@ -34,6 +34,14 @@ EPUB parsing is offline. AutoAudio reads publication spine order, extracts metad
 
 Changing provider settings does not contact an endpoint. Voice discovery occurs only with `--discover-voices`; synthesis occurs only as part of a user-started conversion. OpenAI-compatible speech APIs do not define a standard voice-list endpoint, so those voice IDs are entered manually. See [TTS providers](tts-providers.md).
 
+## Narration text preparation
+
+- `--narrate-toc` / `--no-narrate-toc`: include or omit confidently identified tables of contents. Omission is the default.
+- `--replacement-file <json>`: shared narration replacement rule list.
+- `--replacement-rule SOURCE=SPOKEN`: repeatable whole-word body replacement. A JSON object enables advanced fields.
+
+See [Narration text preparation](narration-text.md) for rule schema, matching behavior, and TOC confidence policy.
+
 ## Narration and segmentation
 
 - `--narrator-profile <id>`: bundled profile ID.

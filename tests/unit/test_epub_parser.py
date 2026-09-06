@@ -86,7 +86,7 @@ def test_parse_epub_builds_autoaudio_snapshot_and_normalizes_gutenberg(tmp_path)
 
     parsed = parse_epub(source)
 
-    assert EPUB_PARSER_POLICY_VERSION == "pubparser-v0.1.1-gutenberg-v1"
+    assert EPUB_PARSER_POLICY_VERSION == "pubparser-document-semantics-v1-gutenberg-v1"
     assert parsed.metadata.title == "Fixture Book"
     assert parsed.metadata.author == "Example Author"
     assert parsed.metadata.language == "en"
@@ -137,3 +137,42 @@ def test_read_epub_metadata_skips_spine_text_parsing(tmp_path):
 def test_parse_epub_reports_missing_file(tmp_path):
     with pytest.raises(EpubParseError, match="file not found"):
         parse_epub(tmp_path / "missing.epub")
+
+
+def test_parse_epub_omits_confident_toc_and_allows_override(tmp_path):
+    source = tmp_path / "toc.epub"
+    container_xml = """<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+      <rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles>
+    </container>"""
+    package_xml = """<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+      <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>TOC fixture</dc:title></metadata>
+      <manifest>
+        <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+        <item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+      </manifest>
+      <spine><itemref idref="nav"/><itemref idref="chapter"/></spine>
+    </package>"""
+    nav = """<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body>
+      <nav epub:type="toc"><h1>Contents</h1><ol>
+        <li><a href="chapter.xhtml#one">Chapter One and its opening</a></li>
+        <li><a href="chapter.xhtml#two">Chapter Two and its continuation</a></li>
+        <li><a href="chapter.xhtml#three">Chapter Three and its conclusion</a></li>
+      </ol></nav></body></html>"""
+    chapter = """<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter One</h1>
+      <p>This narrative document is deliberately long enough to survive the AutoAudio length filter.</p>
+    </body></html>"""
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        archive.writestr("META-INF/container.xml", container_xml)
+        archive.writestr("EPUB/package.opf", package_xml)
+        archive.writestr("EPUB/nav.xhtml", nav)
+        archive.writestr("EPUB/chapter.xhtml", chapter)
+
+    parsed = parse_epub(source)
+    included = parse_epub(source, narrate_toc=True)
+
+    assert parsed.omitted_toc_documents == ("nav",)
+    assert [title for title, _text in parsed.text_blocks] == ["Chapter One"]
+    assert any(item.code == "AUTOAUDIO_TOC_OMITTED" for item in parsed.diagnostics)
+    assert [title for title, _text in included.text_blocks] == ["Contents", "Chapter One"]
+    assert included.omitted_toc_documents == ()

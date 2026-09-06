@@ -122,6 +122,17 @@ def test_gui_uses_dropdowns_for_bundled_speaker_and_model_choices():
     assert "self.model_choice_edit = QLineEdit()" not in source
 
 
+def test_gui_exposes_toc_override_and_structured_replacement_table():
+    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+
+    assert "self.narrate_toc_checkbox = QCheckBox(" in source
+    assert "self.replacement_table = QTableWidget(0, 5)" in source
+    assert '("Source", "Spoken as", "Match", "Scope", "Case")' in source
+    assert "args.replacement_rules = self._collect_replacement_rules()" in source
+    assert 'self._restore_replacement_rules(state.get("replacement_rules"))' in source
+    assert "self.replacement_table.setRowCount(0)" in source
+
+
 def test_gui_connects_structured_progress_and_eta_updates():
     source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
 

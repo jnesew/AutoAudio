@@ -10,7 +10,8 @@ from pubparser import ParsingMode, normalize_project_gutenberg, open_epub
 from metadata.models import BookMetadata, ChapterMetadata
 
 
-EPUB_PARSER_POLICY_VERSION = "pubparser-v0.1.1-gutenberg-v1"
+EPUB_PARSER_POLICY_VERSION = "pubparser-document-semantics-v1-gutenberg-v1"
+TOC_OMISSION_CONFIDENCE = 0.9
 _COVER_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -48,6 +49,7 @@ class ParsedEpub:
     diagnostics: tuple[EpubDiagnostic, ...]
     gutenberg_detected: bool
     gutenberg_changed: bool
+    omitted_toc_documents: tuple[str, ...] = ()
 
 
 def _clean(value: str | None) -> str | None:
@@ -101,7 +103,7 @@ def read_epub_metadata(epub_path: str | Path) -> BookMetadata:
         raise EpubParseError(f"Could not read EPUB metadata from {source}: {exc}") from exc
 
 
-def parse_epub(epub_path: str | Path) -> ParsedEpub:
+def parse_epub(epub_path: str | Path, *, narrate_toc: bool = False) -> ParsedEpub:
     """Parse an EPUB once into normalized text, metadata, cover bytes, and diagnostics."""
     source = Path(epub_path)
     if not source.is_file():
@@ -133,7 +135,28 @@ def parse_epub(epub_path: str | Path) -> ParsedEpub:
 
             text_blocks: list[tuple[str, str]] = []
             chapters: list[ChapterMetadata] = []
+            omitted_toc_documents: list[str] = []
             for document in book.iter_documents(normalization=normalization):
+                toc_semantic = document.semantic("toc")
+                if (
+                    not narrate_toc
+                    and toc_semantic is not None
+                    and toc_semantic.confidence >= TOC_OMISSION_CONFIDENCE
+                ):
+                    omitted_toc_documents.append(document.resource.id)
+                    diagnostics.append(
+                        EpubDiagnostic(
+                            severity="info",
+                            code="AUTOAUDIO_TOC_OMITTED",
+                            message=(
+                                "Omitted confidently identified table of contents "
+                                f"(confidence={toc_semantic.confidence:.2f}; "
+                                f"evidence={','.join(toc_semantic.evidence)})."
+                            ),
+                            resource=document.resource.href,
+                        )
+                    )
+                    continue
                 text = _clean(document.text)
                 if text is None or len(text) <= 50:
                     continue
@@ -177,6 +200,7 @@ def parse_epub(epub_path: str | Path) -> ParsedEpub:
                 diagnostics=tuple(diagnostics),
                 gutenberg_detected=normalization.detected,
                 gutenberg_changed=normalization.changed,
+                omitted_toc_documents=tuple(omitted_toc_documents),
             )
     except EpubParseError:
         raise

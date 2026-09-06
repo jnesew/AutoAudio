@@ -16,7 +16,9 @@ autoaudio --version
 - Experimental VoiceDesign narration from a textual voice description.
 - Provider adapters for ComfyUI, OpenAI-compatible speech endpoints, and ElevenLabs existing voices.
 - Explicit, on-request voice discovery with no automatic endpoint probes.
-- EPUB parsing through MIT-licensed `pubparser` v0.1.1, including Project Gutenberg normalization.
+- EPUB parsing through MIT-licensed `pubparser`, including Project Gutenberg normalization and non-destructive document semantics.
+- Conservative table-of-contents omission with a user override.
+- Global and per-run pronunciation/replacement rules applied before TTS segmentation.
 - FLAC, MP3, and M4B chapter and part outputs.
 - Lossless chapter assembly with configurable disclosure, segment, and chapter spacing.
 - Resumable jobs with immutable book plans and artifact-integrity checkpoints.
@@ -140,6 +142,7 @@ The command fails if a publishable artifact has missing AI metadata, missing or 
 - [Installation and provider setup](Docs/installation.md)
 - [TTS providers and explicit discovery](Docs/tts-providers.md)
 - [Narrators, voices, and Qwen settings](Docs/narrators.md)
+- [Narration text preparation](Docs/narration-text.md)
 - [CLI reference](Docs/cli-reference.md)
 - [Resume, watermarking, and provenance](Docs/provenance-and-resume.md)
 - [Library jobs and Project Gutenberg acquisition](Docs/library-and-gutenberg.md)

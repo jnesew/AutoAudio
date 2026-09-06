@@ -17,7 +17,7 @@ For development, use an editable install:
 python -m pip install -e .
 ```
 
-`pyproject.toml` is the install and packaging contract. `requirements.txt` mirrors its direct runtime dependencies for compatibility and is not the final transitive lock. Both pin `pubparser` v0.1.1 to an immutable commit and AudioSeal to the tested 0.2 API.
+`pyproject.toml` is the install and packaging contract. `requirements.txt` mirrors its direct runtime dependencies for compatibility and is not the final transitive lock. Both pin the tested `pubparser` document-semantics revision to an immutable commit and AudioSeal to the tested 0.2 API.
 
 PyTorch accelerator wheels are platform-specific. Install the appropriate tested CPU, CUDA, or ROCm wheel first when the default PyPI resolution is not suitable; `python -m pip install .` will accept an already installed compatible `torch` distribution. Intel XPU is not part of the v2 qualification matrix.
 
