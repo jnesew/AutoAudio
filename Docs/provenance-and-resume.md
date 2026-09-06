@@ -8,6 +8,33 @@ At the beginning of a job, AutoAudio generates and checkpoints one neutral discl
 
 Every generated narration segment is converted to 24 kHz mono audio, marked with AudioSeal, and immediately passed through the AudioSeal detector. Unverified output is rejected before assembly.
 
+The [AudioSeal reference usage](https://github.com/facebookresearch/audioseal#readme)
+supports 24 kHz speech; AutoAudio retains this rate throughout segment processing and
+lossless assembly. AudioSeal 0.2 does not resample internally, so its ignored
+`sample_rate` argument is not passed.
+
+Matching 24 kHz mono input is decoded directly with SoundFile. Other provider formats
+use one FFmpeg decode/downmix/resample to float32 PCM. Both paths retain floating-point
+precision until the watermark is embedded. Models remain cached in evaluation mode;
+generation and detection run under PyTorch inference mode on the selected device.
+The marked audio is clipped and quantized to PCM16 on that device, and the detector
+checks those exact samples before they are transferred to the CPU for output. This
+avoids the former intermediate WAV writes, librosa reads, and verification upload.
+The segment encoder receives raw PCM and writes the tagged FLAC once. The public
+`watermark_audio_bytes` helper still returns WAV by default.
+
+Verification requires finite detector confidence at or above the threshold and an
+exact match of all 16 message bits, with the expected tensor shape. Malformed detector
+results and non-finite audio fail verification. Existing verified checkpoint artifacts
+remain reusable; new float or resampled inputs can produce different marked samples
+because the old pre-watermark PCM16 conversion has been removed.
+
+This removes codec and transfer overhead; it does not guarantee a particular GPU
+speedup. AudioSeal model loading, inference, and backend initialization can still be
+expensive, especially on a first call. No compilation or global PyTorch thread-setting
+changes are introduced.
+
+
 Each mark carries a deterministic 16-bit message derived from the segment content ID, its pre-watermark audio SHA-256, and the configured watermark key. AutoAudio requires an AudioSeal API capable of embedding that message; it never falls back to an unidentified watermark. The public default key makes the payload reproducible rather than secret. Deployments may set `AUTOAUDIO_WATERMARK_SECRET` to a stable private value, but changing it does not make an already assembled audiobook retroactively verifiable from its final container alone.
 
 The default `--watermark-device auto` setting prefers CUDA when PyTorch reports it available, including AMD ROCm installations, and retries on CPU if automatic GPU execution fails. Explicit `cpu` and `cuda` selections are strict. `AUTOAUDIO_WATERMARK_DEVICE` provides a process-level override.

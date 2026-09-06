@@ -94,7 +94,11 @@ from provenance.ai_marking import (
     validate_watermarked_artifact,
     write_ai_marking_manifest,
 )
-from provenance.audio_watermark import watermark_audio_bytes_best_effort
+from provenance.audio_watermark import (
+    WATERMARK_CHANNELS,
+    WATERMARK_SAMPLE_RATE,
+    watermark_audio_bytes_best_effort,
+)
 from provenance.c2pa import (
     ProvenanceConfig,
     ProvenanceRuntimeMetadata,
@@ -300,6 +304,7 @@ def write_watermarked_audio_artifact(
         content_id=content_id,
         device=watermark_device,
         logger=logger,
+        output_format="s16le",
     )
     if not watermark_result.applied or not watermark_result.verified:
         raise PipelineRuntimeError(
@@ -308,7 +313,10 @@ def write_watermarked_audio_artifact(
         )
 
     adapter = adapter_for_extension(output_path)
-    command = ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0"]
+    command = [
+        "ffmpeg", "-y", "-f", "s16le", "-ar", str(WATERMARK_SAMPLE_RATE),
+        "-ac", str(WATERMARK_CHANNELS), "-i", "pipe:0",
+    ]
     command.extend(ai_marking_metadata_args(provider=ai_provider))
     command.extend(adapter.ffmpeg_output_args())
     command.extend(["-ar", str(ASSEMBLY_SAMPLE_RATE), "-ac", str(ASSEMBLY_CHANNELS)])

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-import contextlib
+import io
+import shutil
+import subprocess
+import wave
 import logging
 import sys
 import warnings
@@ -17,35 +20,6 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from provenance import audio_watermark  # noqa: E402
-
-
-class _FakeTensor:
-    def __init__(self, name: str):
-        self.name = name
-
-    def float(self):
-        return self
-
-    def unsqueeze(self, _dimension: int):
-        return self
-
-    def to(self, _device: str):
-        return self
-
-    def squeeze(self, _dimension: int):
-        return self
-
-    def detach(self):
-        return self
-
-    def cpu(self):
-        return self
-
-    def numpy(self):
-        return self.name
-
-    def __add__(self, _other):
-        return self
 
 
 class _FakeModel:
@@ -131,46 +105,110 @@ def test_audioseal_model_loading_suppresses_only_known_dependency_warnings():
     ]
 
 
-def test_audioseal_02_calls_do_not_pass_ignored_sample_rate():
-    source_tensor = _FakeTensor("source")
-    verification_tensor = _FakeTensor("verification")
-    tensors = iter((source_tensor, verification_tensor))
-    torch_module = ModuleType("torch")
-    torch_module.from_numpy = Mock(side_effect=lambda _array: next(tensors))
-    torch_module.no_grad = contextlib.nullcontext
-    torch_module.clamp = Mock(side_effect=lambda tensor, _minimum, _maximum: tensor)
-    torch_module.is_tensor = Mock(return_value=False)
+def _wav_bytes(samples, rate=24000, subtype="PCM_16"):
+    sf = pytest.importorskip("soundfile")
+    output = io.BytesIO()
+    sf.write(output, samples, rate, format="WAV", subtype=subtype)
+    return output.getvalue()
 
-    librosa_module = ModuleType("librosa")
-    librosa_module.load = Mock(side_effect=(("decoded", 24000), ("verified", 24000)))
-    soundfile_module = ModuleType("soundfile")
-    soundfile_module.write = Mock(side_effect=lambda output, *_args, **_kwargs: output.write(b"encoded-wav"))
 
-    message = _FakeTensor("message")
-    watermark = _FakeTensor("watermark")
-    generator = SimpleNamespace(get_watermark=Mock(return_value=watermark))
-    detector = SimpleNamespace(detect_watermark=Mock(return_value=(1.0, object())))
+@pytest.mark.parametrize("output_format", ["wav", "s16le"])
+def test_verification_uses_exact_exported_pcm_without_codec_roundtrip(monkeypatch, output_format):
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    sf = pytest.importorskip("soundfile")
+    samples = np.array([-1.0, -0.12345, 0, 0.12345, 0.99999, 1.0], dtype=np.float32)
+    source = _wav_bytes(samples, subtype="FLOAT")
+    message = torch.zeros((1, 16), dtype=torch.int64)
+    verified = []
 
-    with patch.dict(
-        sys.modules,
-        {"librosa": librosa_module, "soundfile": soundfile_module, "torch": torch_module},
-    ), patch(
-        "provenance.audio_watermark._derive_16bit_message", return_value=message
-    ), patch(
-        "provenance.audio_watermark._load_audioseal_models", return_value=(generator, detector)
-    ), patch(
-        "provenance.audio_watermark.subprocess.run",
-        return_value=SimpleNamespace(stdout=b"decoded-wav"),
-    ):
+    def embed(wav, *, message):
+        assert torch.is_inference_mode_enabled()
+        assert wav.shape == (1, 1, len(samples))
+        return torch.full_like(wav, 0.0001)
+
+    def detect(wav):
+        assert torch.is_inference_mode_enabled()
+        verified.append(wav.clone())
+        return torch.tensor([1.0]), message
+
+    monkeypatch.setattr(audio_watermark, "_derive_16bit_message", lambda *args: message)
+    generator = SimpleNamespace(get_watermark=Mock(side_effect=embed))
+    detector = SimpleNamespace(detect_watermark=Mock(side_effect=detect))
+    monkeypatch.setattr(audio_watermark, "_load_audioseal_models", lambda _: (generator, detector))
+    with patch.object(audio_watermark.subprocess, "run", side_effect=AssertionError("unexpected FFmpeg")):
         result = audio_watermark.watermark_audio_bytes(
-            b"input-audio",
-            content_id="book/chapter/segment",
-            secret_key="test-secret",
+            source, content_id="segment", secret_key="key", output_format=output_format,
         )
+    if output_format == "wav":
+        with wave.open(io.BytesIO(result)) as output:
+            assert (output.getframerate(), output.getnchannels(), output.getsampwidth()) == (24000, 1, 2)
+            result = output.readframes(output.getnframes())
+    actual = np.frombuffer(result, dtype="<i2").astype(np.float32) / 32768
+    np.testing.assert_array_equal(verified[0].numpy().reshape(-1), actual)
+    reference, _ = sf.read(io.BytesIO(_wav_bytes(samples + np.float32(0.0001))), dtype="float32")
+    np.testing.assert_array_equal(actual, reference)
+    assert generator.get_watermark.call_count == detector.detect_watermark.call_count == 1
 
-    assert result == b"encoded-wav"
-    generator.get_watermark.assert_called_once_with(source_tensor, message=message)
-    detector.detect_watermark.assert_called_once_with(verification_tensor)
+
+@pytest.mark.parametrize("probability,message,error", [
+    (0.49, "valid", RuntimeError), (float("nan"), "valid", RuntimeError),
+    (float("inf"), "valid", RuntimeError), (1.0, "wrong", RuntimeError),
+    (1.0, "shape", audio_watermark.AudioSealCompatibilityError),
+    (1.0, "object", audio_watermark.AudioSealCompatibilityError),
+])
+def test_verification_rejects_invalid_evidence(probability, message, error):
+    torch = pytest.importorskip("torch")
+    expected = torch.zeros((1, 16), dtype=torch.int64)
+    detected = {"valid": expected, "wrong": torch.ones_like(expected),
+                "shape": torch.zeros(16), "object": object()}[message]
+    detector = SimpleNamespace(detect_watermark=lambda _: (probability, detected))
+    with pytest.raises(error, match="verification"):
+        audio_watermark._verify_watermark(detector, object(), expected, 0.5)
+
+
+@pytest.mark.parametrize("rate,channels", [(24000, 1), (48000, 2), (22050, 1)])
+def test_decode_normalizes_provider_audio_once(rate, channels):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("soundfile")
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("FFmpeg required")
+    samples = np.zeros((rate // 10, channels), dtype=np.float32)
+    with patch.object(audio_watermark.subprocess, "run", wraps=subprocess.run) as decode:
+        result = audio_watermark._decode_audio(_wav_bytes(samples, rate))
+    assert result.shape == (2400,)
+    assert result.dtype == np.float32
+    assert decode.call_count == (0 if (rate, channels) == (24000, 1) else 1)
+
+
+def test_decode_supports_compressed_provider_response():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("soundfile")
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("FFmpeg required")
+    source = _wav_bytes(np.zeros(2400, dtype=np.float32))
+    aac = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "adts", "pipe:1"],
+                         input=source, capture_output=True, check=True).stdout
+    with patch.object(audio_watermark.subprocess, "run", wraps=subprocess.run) as decode:
+        result = audio_watermark._decode_audio(aac)
+    assert result.size >= 2400
+    assert decode.call_count == 1
+
+
+@pytest.mark.parametrize("samples", [[], [float("nan")], [float("inf")]])
+def test_decode_rejects_empty_or_nonfinite_input(samples):
+    np = pytest.importorskip("numpy")
+    with pytest.raises(ValueError, match="finite audio"):
+        audio_watermark._decode_audio(_wav_bytes(np.array(samples, dtype=np.float32), subtype="FLOAT"))
+
+
+def test_nonfinite_generator_output_is_rejected(monkeypatch):
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    generator = SimpleNamespace(get_watermark=lambda wav, **kw: torch.full_like(wav, float("nan")))
+    monkeypatch.setattr(audio_watermark, "_load_audioseal_models", lambda _: (generator, object()))
+    with pytest.raises(RuntimeError, match="non-finite"):
+        audio_watermark.watermark_audio_bytes(_wav_bytes(np.zeros(2400)), content_id="s", secret_key="k")
 
 
 @pytest.mark.parametrize(
@@ -308,3 +346,37 @@ def test_message_api_incompatibility_does_not_trigger_device_fallback(monkeypatc
     assert result.applied is False
     assert audio == b"source"
     assert watermark.call_count == 1
+
+
+def test_pipeline_flac_preserves_verified_samples_and_manifest(monkeypatch, tmp_path):
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    sf = pytest.importorskip("soundfile")
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("FFmpeg required")
+    from core.pipeline import write_watermarked_audio_artifact
+    from provenance.ai_marking import validate_watermarked_artifact
+
+    source = _wav_bytes(np.linspace(-0.9, 0.9, 2400, dtype=np.float32))
+    expected = []
+    message = torch.zeros((1, 16), dtype=torch.int64)
+
+    def detect(wav):
+        expected.append(wav.numpy().reshape(-1).copy())
+        return 1.0, message
+
+    monkeypatch.delenv("AUTOAUDIO_WATERMARK_DEVICE", raising=False)
+    monkeypatch.setattr(audio_watermark, "_derive_16bit_message", lambda *args: message)
+    monkeypatch.setattr(audio_watermark, "_load_audioseal_models", lambda _: (
+        SimpleNamespace(get_watermark=lambda wav, **kw: torch.full_like(wav, 0.001)),
+        SimpleNamespace(detect_watermark=detect),
+    ))
+    output = tmp_path / "segment.flac"
+    write_watermarked_audio_artifact(
+        audio_data=source, output_path=output, content_id="segment", watermark_device="cpu",
+        ai_provider="test", logger=logging.getLogger("test"),
+    )
+    decoded, rate = sf.read(output, dtype="float32")
+    assert rate == 24000
+    np.testing.assert_array_equal(decoded, expected[0])
+    validate_watermarked_artifact(output)

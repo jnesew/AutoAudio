@@ -4,11 +4,17 @@ import hashlib
 import hmac
 import io
 import logging
+import math
 import os
 import subprocess
 import warnings
+import wave
 from dataclasses import dataclass
 from functools import lru_cache
+
+
+WATERMARK_SAMPLE_RATE = 24_000
+WATERMARK_CHANNELS = 1
 
 
 _AUDIOSEAL_JIT_WARNING = r"`torch\.jit\.script` is not supported in Python 3\.14\+"
@@ -101,6 +107,53 @@ class WatermarkResult:
     detail: str
 
 
+def _decode_audio(audio_data: bytes):
+    """Decode canonical audio directly; let FFmpeg normalize other provider formats."""
+    import numpy as np
+    import soundfile as sf
+
+    try:
+        with sf.SoundFile(io.BytesIO(audio_data)) as source:
+            if source.samplerate == WATERMARK_SAMPLE_RATE and source.channels == WATERMARK_CHANNELS:
+                samples = source.read(dtype="float32")
+                if samples.size == 0 or not np.isfinite(samples).all():
+                    raise ValueError("AudioSeal input must contain finite audio samples.")
+                return samples
+    except sf.LibsndfileError:
+        # Containers/codecs unsupported by libsndfile still work through FFmpeg.
+        pass
+
+    decoded = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", "pipe:0", "-map", "0:a:0",
+         "-vn", "-ac", str(WATERMARK_CHANNELS), "-ar", str(WATERMARK_SAMPLE_RATE),
+         "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"],
+        input=audio_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    # Copy the read-only bytes buffer before sharing it with PyTorch.
+    samples = np.frombuffer(decoded.stdout, dtype="<f4").astype(np.float32, copy=True)
+    if samples.size == 0 or not np.isfinite(samples).all():
+        raise ValueError("AudioSeal input must contain finite audio samples.")
+    return samples
+
+
+def _verify_watermark(detector, samples, message, threshold: float) -> None:
+    import torch
+
+    probability, detected = detector.detect_watermark(samples)
+    confidence = _as_float(probability)
+    if not math.isfinite(confidence) or confidence < threshold:
+        raise RuntimeError("AudioSeal verification failed: detector confidence below threshold or non-finite.")
+    if not torch.is_tensor(detected) or detected.shape != message.shape:
+        raise AudioSealCompatibilityError("AudioSeal verification returned an invalid message shape/type.")
+    expected = message.to(detected.device)
+    # The 0.2 high-level API returns binary bits, not unthresholded logits.
+    if not torch.equal(detected, expected):
+        raise RuntimeError("AudioSeal verification failed: embedded message did not round-trip.")
+
+
 def watermark_audio_bytes(
     audio_data: bytes,
     *,
@@ -109,50 +162,49 @@ def watermark_audio_bytes(
     device: str = "cpu",
     verify: bool = True,
     verify_threshold: float = 0.5,
+    output_format: str = "wav",
 ) -> bytes:
-    """Embed an AudioSeal watermark into an audio byte stream (24 kHz mono processing)."""
-    import librosa
-    import soundfile as sf
+    """Embed and verify 24 kHz mono PCM16; return WAV or headerless s16le.
+
+    AudioSeal 0.2 supports 24 kHz speech without internal resampling. Verification
+    uses the exact PCM16 samples exported, including clipping and quantization,
+    rather than the unquantized generator output. No encode/decode round trip is
+    needed to obtain those samples.
+    """
     import torch
 
+    if output_format not in {"wav", "s16le"}:
+        raise ValueError("Watermark output format must be wav or s16le.")
+    if not math.isfinite(verify_threshold) or not 0 <= verify_threshold <= 1:
+        raise ValueError("AudioSeal verification threshold must be between 0 and 1.")
+    device = resolve_audioseal_device(device)
+    samples = _decode_audio(audio_data)
     source_sha256 = hashlib.sha256(audio_data).hexdigest()
-    msg = _derive_16bit_message(secret_key, content_id, source_sha256).to(device)
     generator, detector = _load_audioseal_models(device)
 
-    decode_proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "24000", "-f", "wav", "pipe:1"],
-        input=audio_data,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=True
-    )
-    decoded_wav_bytes = decode_proc.stdout
+    with torch.inference_mode():
+        message = _derive_16bit_message(secret_key, content_id, source_sha256).to(device)
+        wav = torch.from_numpy(samples).unsqueeze(0).unsqueeze(0).to(device)
+        watermark = _watermark_with_message(generator, wav, message)
+        watermarked = wav + watermark
+        if not torch.isfinite(watermarked).all().item():
+            raise RuntimeError("AudioSeal generated non-finite audio samples.")
+        # Match libsndfile's PCM16 conversion, explicitly handling +1.0 and -1.0.
+        pcm = torch.floor(watermarked * 32768).clamp(-32768, 32767).to(torch.int16)
+        del wav, watermark, watermarked
+        if verify:
+            _verify_watermark(detector, pcm.float() / 32768, message, verify_threshold)
+        pcm_bytes = pcm.squeeze(0).squeeze(0).cpu().numpy().astype("<i2", copy=False).tobytes()
 
-    wav_np, sr = librosa.load(io.BytesIO(decoded_wav_bytes), sr=24000, mono=True)
-    wav = torch.from_numpy(wav_np).float().unsqueeze(0).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        watermark = _watermark_with_message(generator, wav, msg)
-        watermarked = torch.clamp(wav + watermark, -1.0, 1.0)
-
-    out_io = io.BytesIO()
-    sf.write(out_io, watermarked.squeeze(0).squeeze(0).detach().cpu().numpy(), sr, format="WAV")
-    watermarked_wav_bytes = out_io.getvalue()
-
-    if verify:
-        verify_np, _ = librosa.load(io.BytesIO(watermarked_wav_bytes), sr=24000, mono=True)
-        verify_tensor = torch.from_numpy(verify_np).float().unsqueeze(0).unsqueeze(0).to(device)
-        with torch.no_grad():
-            prob, detected_msg = detector.detect_watermark(verify_tensor)
-
-        if _as_float(prob) < verify_threshold:
-            raise RuntimeError("AudioSeal verification failed: detector confidence below threshold.")
-        if torch.is_tensor(detected_msg):
-            expected = msg.to(detected_msg.device)
-            if detected_msg.shape == expected.shape and not torch.equal((detected_msg > 0.5).to(expected.dtype), expected):
-                raise RuntimeError("AudioSeal verification failed: embedded message did not round-trip.")
-
-    return watermarked_wav_bytes
+    if output_format == "s16le":
+        return pcm_bytes
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(WATERMARK_CHANNELS)
+        stream.setsampwidth(2)
+        stream.setframerate(WATERMARK_SAMPLE_RATE)
+        stream.writeframes(pcm_bytes)
+    return output.getvalue()
 
 
 def watermark_audio_bytes_best_effort(
@@ -161,6 +213,7 @@ def watermark_audio_bytes_best_effort(
     content_id: str,
     device: str = "auto",
     logger: logging.Logger | None = None,
+    output_format: str = "wav",
 ) -> tuple[WatermarkResult, bytes]:
     """Return watermark evidence and bytes; strict callers reject a failed result."""
     log = logger or logging.getLogger("autoaudio.run")
@@ -177,6 +230,7 @@ def watermark_audio_bytes_best_effort(
             device=resolved_device,
             verify=True,
             verify_threshold=0.5,
+            output_format=output_format,
         )
         detail = f"verified; requested={requested_device}; device={resolved_device}"
         return WatermarkResult(applied=True, verified=True, method="audioseal", detail=detail), out_bytes
@@ -205,6 +259,7 @@ def watermark_audio_bytes_best_effort(
                     device="cpu",
                     verify=True,
                     verify_threshold=0.5,
+                    output_format=output_format,
                 )
                 detail = "verified; requested=auto; device=cpu; fallback_from=cuda"
                 return WatermarkResult(applied=True, verified=True, method="audioseal", detail=detail), out_bytes
