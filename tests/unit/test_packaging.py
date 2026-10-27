@@ -76,6 +76,7 @@ def test_packaging_contract_includes_runtime_packages_resources_and_notices():
     }
     manifest = (PROJECT_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
     assert "recursive-include examples *.json" in manifest
+    assert "recursive-include docs *.md" in manifest
 
 
 def test_source_checkout_app_config_resolves_bundled_resources():
@@ -88,7 +89,9 @@ def test_source_checkout_app_config_resolves_bundled_resources():
 
 
 def test_local_documentation_links_resolve():
-    documents = [PROJECT_ROOT / "README.md", *(PROJECT_ROOT / "Docs").rglob("*.md")]
+    docs_dir = PROJECT_ROOT / "docs"
+    assert docs_dir.is_dir()
+    documents = [PROJECT_ROOT / "README.md", *docs_dir.rglob("*.md")]
     link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 
     missing: list[str] = []
