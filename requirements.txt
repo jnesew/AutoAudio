@@ -9,7 +9,6 @@ PySide6>=6.7
 
 numpy
 torch
-librosa
 soundfile
 # AutoAudio uses the 0.2 no-internal-resampling API and its published checkpoints.
 audioseal==0.2.0

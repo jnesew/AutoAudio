@@ -193,6 +193,8 @@ class BookPlanStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as file:
                 json.dump(plan.to_dict(), file, ensure_ascii=False, indent=2, sort_keys=True)
+                file.flush()
+                os.fsync(file.fileno())
             os.replace(temp_path, self.path)
         finally:
             if os.path.exists(temp_path):

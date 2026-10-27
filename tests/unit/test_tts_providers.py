@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import io
+import urllib.error
+from unittest.mock import patch
 import sys
 from pathlib import Path
 
@@ -12,7 +15,9 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from core.config import AppConfig, GenerationSettings, TTSConfig
-from tts import TTSConfigurationError, VoiceDiscoveryUnsupported, discover_provider_voices
+from tts import TTSConfigurationError, TTSConnectionError, TTSProtocolError, VoiceDiscoveryUnsupported, discover_provider_voices
+from core.cancellation import CancellationToken
+from core.errors import PipelineCancelled
 from tts.http import ElevenLabsSpeechProvider, OpenAICompatibleSpeechProvider
 from tts.router import build_speech_provider
 
@@ -25,6 +30,7 @@ class FakeHeaders(dict):
 class FakeResponse:
     def __init__(self, payload: bytes, content_type: str):
         self.payload = payload
+        self.stream = io.BytesIO(payload)
         self.headers = FakeHeaders({"Content-Type": content_type})
 
     def __enter__(self):
@@ -33,8 +39,8 @@ class FakeResponse:
     def __exit__(self, *_args):
         return False
 
-    def read(self) -> bytes:
-        return self.payload
+    def read(self, size=-1) -> bytes:
+        return self.stream.read(size)
 
 
 def test_provider_construction_is_network_inert(monkeypatch):
@@ -87,7 +93,7 @@ def test_openai_compatible_generation_uses_standard_speech_contract(monkeypatch)
     assert request.full_url == "https://speech.example/v1/audio/speech"
     assert request.get_method() == "POST"
     assert request.get_header("Authorization") == "Bearer secret-value"
-    assert timeout == 12
+    assert 0 < timeout <= 12
     assert json.loads(request.data) == {
         "model": "speech-model",
         "voice": "calm-reader",
@@ -273,3 +279,81 @@ def test_openai_discovery_router_does_not_contact_an_endpoint():
                 voice="voice",
             )
         )
+
+
+@pytest.mark.parametrize("error", (TimeoutError("ambiguous read failure"), urllib.error.HTTPError(
+    "https://example.test", 503, "backend failure", {}, io.BytesIO(b"failed"),
+)))
+def test_ambiguous_synthesis_failure_is_not_automatically_resubmitted(error):
+    calls = []
+
+    def request(*_args, **_kwargs):
+        calls.append(1)
+        raise error
+
+    provider = OpenAICompatibleSpeechProvider(
+        TTSConfig(provider="openai-compatible", model="model", voice="voice"), urlopen=request,
+    )
+    with pytest.raises(TTSConnectionError):
+        provider.generate_audio(text_segment="Do not submit this twice.")
+    assert len(calls) == 1
+
+
+def test_large_response_is_rejected_before_unbounded_buffering():
+    provider = OpenAICompatibleSpeechProvider(TTSConfig(provider="openai-compatible", model="m", voice="v"),
+        urlopen=lambda *_a, **_k: FakeResponse(b"x" * 101, "audio/wav"))
+    import urllib.request
+    with pytest.raises(TTSProtocolError, match="size limit"):
+        provider._request_bytes(urllib.request.Request("http://example.test", data=b"{}"),
+            timeout_seconds=5, maximum_bytes=100)
+
+
+def test_pause_is_observed_between_response_chunks():
+    cancellation = CancellationToken()
+
+    class PausingResponse(FakeResponse):
+        def read(self, size=-1):
+            chunk = super().read(size)
+            cancellation.cancel()
+            return chunk
+
+    provider = OpenAICompatibleSpeechProvider(TTSConfig(provider="openai-compatible", model="m", voice="v"),
+        urlopen=lambda *_a, **_k: PausingResponse(b"x" * 100_000, "audio/wav"))
+    with pytest.raises(PipelineCancelled):
+        provider.generate_audio(text_segment="Sample", cancellation=cancellation)
+
+
+def test_explicit_rate_rejection_can_retry_synthesis():
+    calls = []
+
+    def request(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError("http://example.test", 429, "rate limited", {}, io.BytesIO(b"busy"))
+        return FakeResponse(b"RIFF" + b"\0" * 32, "audio/wav")
+
+    provider = OpenAICompatibleSpeechProvider(TTSConfig(provider="openai-compatible", model="m", voice="v"),
+        urlopen=request, sleep=lambda _seconds: None)
+    assert provider.generate_audio(text_segment="Sample").content.startswith(b"RIFF")
+    assert len(calls) == 2
+
+
+def test_a_late_response_cannot_reset_the_deadline_or_retry_the_post():
+    clock = [0.0]
+    calls = []
+
+    class LateResponse(FakeResponse):
+        def read(self, size=-1):
+            clock[0] = 10.0
+            return super().read(size)
+
+    def request(*_args, **_kwargs):
+        calls.append(1)
+        return LateResponse(b"RIFF" + b"\0" * 32, "audio/wav")
+
+    provider = OpenAICompatibleSpeechProvider(TTSConfig(provider="openai-compatible", model="m", voice="v"),
+        urlopen=request)
+    with patch("time.monotonic", side_effect=lambda: clock[0]):
+        with pytest.raises(TTSConnectionError, match="deadline"):
+            provider.generate_audio(text_segment="Sample", timeout_seconds=5)
+    assert calls == [1]

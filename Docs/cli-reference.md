@@ -8,6 +8,8 @@ autoaudio --help
 
 Source checkouts may equivalently use `python auto_audiobook.py`.
 
+For worked conversion and resume examples, see [Command-line usage](command-line-usage.md).
+
 ## Input and book planning
 
 - `--input-book <path>`: EPUB, TXT, Markdown, or RST input.
@@ -39,6 +41,20 @@ Changing provider settings does not contact an endpoint. Voice discovery occurs 
 - `--narrate-toc` / `--no-narrate-toc`: include or omit confidently identified tables of contents. Omission is the default.
 - `--replacement-file <json>`: shared narration replacement rule list.
 - `--replacement-rule SOURCE=SPOKEN`: repeatable whole-word body replacement. A JSON object enables advanced fields.
+- `--exclude-chapter <int>`: exclude a one-based chapter number after grouping. Repeat for multiple chapters; at least one chapter must remain included.
+- `--chapter-text-override <json>`: replace a grouped chapter's spoken text after replacement rules. Repeat JSON objects containing `chapter` (a one-based number) and nonempty `text`.
+
+For example, exclude front matter and replace the next chapter's spoken text:
+
+```bash
+autoaudio --input-book /path/to/book.epub --output-dir /path/to/new-run \
+  --exclude-chapter 1 \
+  --chapter-text-override '{"chapter": 2, "text": "The edited narration for this chapter."}'
+```
+
+Chapter numbers refer to the grouped plan, and excluded chapters retain their original numbers.
+Changing grouping can invalidate existing chapter choices. Choices and edits participate in resume
+compatibility; use a new output directory when changing an existing job's narration.
 
 See [Narration text preparation](narration-text.md) for rule schema, matching behavior, and TOC confidence policy.
 
@@ -73,6 +89,25 @@ See [Narration text preparation](narration-text.md) for rule schema, matching be
 AutoAudio builds normalized 24 kHz mono FLAC masters and encodes MP3 or M4B once from those lossless masters.
 
 An explicit `cpu` or `cuda` selection never changes devices silently. On AMD ROCm systems, select `cuda`, which is the device name exposed by PyTorch. The `AUTOAUDIO_WATERMARK_DEVICE` environment variable can override this setting for a process.
+
+### AudioSeal environment settings
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `AUTOAUDIO_WATERMARK_DEVICE` | Value of `--watermark-device` | Process-level device override; takes precedence over the CLI/GUI selection. |
+| `AUTOAUDIO_WATERMARK_CPU_THREADS` | Smaller of 4 and the current Torch intra-op count | Positive integer CPU thread override, scoped to watermark inference and restored afterward. |
+| `AUTOAUDIO_WATERMARK_CPU_MKLDNN` | Unset / `0` | Native CPU detector kernels. Set `1` to retain the caller's oneDNN setting; does not change GPU execution. |
+| `AUTOAUDIO_WATERMARK_SECRET` | Public reproducible default | Key used to derive the 16-bit identifying payload. A private value does not replace signed author provenance. |
+
+For example, require CPU watermarking with a four-thread override (POSIX shell syntax):
+
+```bash
+AUTOAUDIO_WATERMARK_CPU_THREADS=4 autoaudio \
+  --input-book /path/to/book.epub --output-dir /path/to/output --watermark-device cpu
+```
+
+See [CPU performance and benchmarking](installation.md#audioseal-cpu-performance) and
+[watermark evidence](provenance-and-resume.md#audioseal-marking) for scope and verification details.
 
 ## Metadata
 

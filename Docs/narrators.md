@@ -2,7 +2,7 @@
 
 ## Provider voice selection
 
-ComfyUI uses the bundled narrator profiles described below. OpenAI-compatible and ElevenLabs adapters instead use an existing endpoint voice ID supplied in **Endpoint voice id** or `--tts-voice`.
+ComfyUI uses the bundled narrator profiles described below. OpenAI-compatible and ElevenLabs adapters instead use an existing endpoint voice ID supplied in **Voice ID** or `--tts-voice`.
 
 For OpenAI-compatible synthesis, AutoAudio sends the selected profile's voice/style instruction when the endpoint supports the standard `instructions` field. ElevenLabs synthesis sends text, model ID, and optional language code; it does not call voice creation or cloning APIs.
 
@@ -63,3 +63,11 @@ For reliable long-form output:
 - Keep one profile and seed for the entire book.
 - Leave model unloading disabled unless memory pressure requires it.
 - Test a short representative chapter before starting a full book.
+
+The default segmentation policy targets 150 words with a 220-word ceiling for preset voices, and
+190 words with a 240-word ceiling for designed voices. `--target-words-per-segment` and
+`--max-words-per-segment` override these defaults. Character, UTF-8-byte, and CJK limits still apply;
+see [Narration text preparation](narration-text.md#request-size-limits).
+
+In the GUI, use **Generate short sample** to check a bounded excerpt and audible disclosure before a
+full conversion. See [GUI usage](desktop-workflow.md#preview-and-samples).

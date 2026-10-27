@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from provenance.ai_marking import AI_MARKING_COMMENT, write_ai_marking_manifest
-from provenance.verify import AI_TAGS, _iter_audio_files, verify_artifact
+from provenance.ai_marking import AI_MARKING_COMMENT, write_ai_marking_manifest, validate_watermarked_artifact
+from provenance.verify import AI_TAGS, _iter_audio_files, verify_artifact, main
 
 
 def _marked_artifact(path: Path, *, provider: str = "ComfyUI") -> Path:
@@ -79,3 +81,31 @@ def test_verifier_ignores_internal_state_and_optionally_includes_segments(tmp_pa
 
     assert _iter_audio_files(tmp_path) == [chapter]
     assert _iter_audio_files(tmp_path, include_segments=True) == [segment, chapter]
+
+
+@pytest.mark.parametrize("payload", (
+    [], None, "text", 7,
+    {"marking_methods": []},
+    {"marking_methods": {"audio_watermark": []}},
+    {"marking_methods": {"audio_watermark": {"applied": "false", "verified": "true"}}},
+))
+def test_malformed_manifest_shapes_fail_audit_and_source_validation(tmp_path, payload):
+    artifact = _marked_artifact(tmp_path / "bad.flac")
+    artifact.with_suffix(".flac.ai.json").write_text(json.dumps(payload), encoding="utf-8")
+    with patch("provenance.verify._probe_tags", return_value=AI_TAGS):
+        ok, errors = verify_artifact(artifact)
+    assert not ok
+    assert any("invalid manifest" in error for error in errors)
+    with pytest.raises(ValueError):
+        validate_watermarked_artifact(artifact)
+
+
+def test_bad_manifest_does_not_stop_the_remaining_audit(tmp_path, capsys):
+    bad = _marked_artifact(tmp_path / "a-bad.flac")
+    bad.with_suffix(".flac.ai.json").write_text("[]", encoding="utf-8")
+    _marked_artifact(tmp_path / "z-good.flac")
+    tags = {**AI_TAGS, "ai_provider": "ComfyUI", "ai_marking": "audio_watermark+metadata+manifest"}
+    with patch("provenance.verify._probe_tags", return_value=tags):
+        assert main(["--output-dir", str(tmp_path)]) == 1
+    output = capsys.readouterr().out
+    assert "z-good.flac" in output and "Checked 2 artifact(s); failures: 1" in output

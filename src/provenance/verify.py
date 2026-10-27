@@ -12,7 +12,7 @@ if __package__ in {None, ""}:
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from provenance.ai_marking import AI_MARKING_COMMENT, AI_MARKING_SCHEMA, LEGACY_COMFYUI_AI_MARKING_COMMENT
+from provenance.ai_marking import AI_MARKING_COMMENT, AI_MARKING_SCHEMA, LEGACY_COMFYUI_AI_MARKING_COMMENT, load_ai_marking_manifest
 
 
 AI_TAGS = {
@@ -41,7 +41,7 @@ def _manifest_path(artifact: Path) -> Path:
 
 
 def _load_manifest(manifest_path: Path) -> dict:
-    return json.loads(manifest_path.read_text(encoding="utf-8"))
+    return load_ai_marking_manifest(manifest_path)
 
 
 def _sha256_file(path: Path) -> str:
@@ -63,7 +63,7 @@ def _probe_tags(artifact: Path) -> dict[str, str]:
         "json",
         str(artifact),
     ]
-    output = subprocess.check_output(command, text=True)
+    output = subprocess.check_output(command, text=True, timeout=30)
     payload = json.loads(output)
     return {str(key).lower(): str(value) for key, value in (payload.get("format", {}).get("tags") or {}).items()}
 
@@ -79,7 +79,7 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
         try:
             manifest = _load_manifest(manifest_path)
         except Exception as exc:
-            errors.append(f"invalid manifest JSON ({manifest_path}): {exc}")
+            errors.append(f"invalid manifest ({manifest_path}): {exc}")
             manifest = {}
 
         if manifest.get("schema") != AI_MARKING_SCHEMA:
@@ -91,7 +91,11 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
         if not isinstance(manifest.get("provider"), str) or not manifest.get("provider", "").strip():
             errors.append(f"manifest provider is missing for {artifact.name}")
         expected_sha256 = manifest.get("artifact_sha256")
-        actual_sha256 = _sha256_file(artifact)
+        try:
+            actual_sha256 = _sha256_file(artifact)
+        except OSError as exc:
+            errors.append(f"could not read artifact {artifact}: {exc}")
+            actual_sha256 = None
         if expected_sha256 != actual_sha256:
             errors.append(
                 f"manifest artifact hash mismatch for {artifact.name}: "

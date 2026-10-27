@@ -56,3 +56,37 @@ def test_mode_defaults_favor_larger_voice_design_segments():
 def test_invalid_segment_policy_is_rejected():
     with pytest.raises(ValueError, match="cannot exceed"):
         SegmentPolicy(target_words=201, max_words=200)
+
+
+@pytest.mark.parametrize("text", (
+    "这是一个长篇中文测试句子。" * 1500,
+    "句読点なしの日本語テキスト" * 1600,
+    "https://example.test/" + "a" * 20_000,
+    "😀" * 5000,
+    ("a" * 120 + " ") * 200,
+))
+def test_character_and_utf8_limits_bound_every_segment_without_losing_content(text):
+    policy = SegmentPolicy(target_words=150, max_words=220, max_chars=600, max_bytes=1000)
+    segments = segment_text_for_qwen(text, policy)
+    assert len(segments) > 1
+    assert all(policy.accepts(segment) for segment in segments)
+    assert "".join("".join(segment.split()) for segment in segments) == "".join(text.split())
+
+
+def test_cjk_sentence_boundaries_are_preferred():
+    text = "第一句。第二句！第三句？第四句。"
+    segments = segment_text_for_qwen(text, SegmentPolicy(10, 20, max_chars=9))
+    assert segments == ["第一句。 第二句！", "第三句？ 第四句。"]
+
+
+def test_default_cjk_budget_is_tied_to_word_limit_instead_of_a_whole_chapter():
+    policy = default_segment_policy("preset")
+    segments = segment_text_for_qwen("長" * 20_000, policy)
+    assert max(map(len, segments)) <= policy.max_words * 2
+    assert "".join(segments) == "長" * 20_000
+
+
+@pytest.mark.parametrize("kwargs", ({"max_chars": 0}, {"max_bytes": 3}))
+def test_invalid_character_or_byte_limit_is_rejected(kwargs):
+    with pytest.raises(ValueError, match="max_chars"):
+        SegmentPolicy(10, 20, **kwargs)

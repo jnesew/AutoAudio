@@ -31,8 +31,10 @@ The repository tracks only placeholders beneath `books` and `audiobook_output`. 
 - `.autoaudio_state` checkpoints and internal masters;
 - `.segments` caches and their AI-marking sidecars.
 
-This reduces the chance that a broad `git add` will publish source or generated works from a fork. The source
-and output directories are created automatically if absent.
+This reduces the chance that a broad `git add` will publish source or generated works from a fork.
+Scanning does not create a missing source directory. Downloads create the configured books directory;
+starting a run creates its output directory. Local GUI drafts are stored separately under
+`audiobook_output/.gui/drafts.json`.
 
 ## Project Gutenberg search
 
@@ -41,7 +43,7 @@ The client follows these boundaries:
 
 - a search request occurs only when the user presses **Search** or Enter;
 - only one result page is requested, with **More results** providing explicit pagination;
-- search results remain lightweight; **Review & download selected EPUB…** requests the selected title's
+- search results remain lightweight; **Review & Download** requests the selected title's
   OPDS detail feed so its contributors, language, rights, and acquisition formats can be shown;
 - no covers, related titles, unselected detail pages, speculative pages, or book files are prefetched;
 - repeated identical result pages are cached for the current application session;
@@ -64,7 +66,7 @@ References:
 
 ## Explicit acquisition
 
-Selecting a result does not make another request or download it. **Review & download selected EPUB…** loads
+Selecting a result does not make another request or download it. **Review & Download** loads
 only that title's OPDS detail feed, merges its available editions, and then opens a confirmation containing
 the specific title, contributors, language, preferred EPUB format, reported size, and catalog rights
 statement. The default answer is No. Only acceptance starts the EPUB request. EPUB3 with images is preferred

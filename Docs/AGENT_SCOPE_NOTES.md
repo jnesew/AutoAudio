@@ -1,8 +1,9 @@
 # Agent Scope Notes
 
-## Portable ComfyUI Bundle (Future Maintainer Task)
+## External ComfyUI runtime
 
-A portable ComfyUI distribution will be added to this repository by the maintainer in a future change.
+ComfyUI, its model files, and its container/dependency management are external to AutoAudio. Runtime
+packaging changes are a separate maintainer decision; current work must not assume a bundled distribution.
 
 ### Out of scope for agents
 Agents must **not**:

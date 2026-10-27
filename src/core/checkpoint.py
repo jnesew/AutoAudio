@@ -72,6 +72,9 @@ class CheckpointStore:
         version = data.get("version")
         if version != CHECKPOINT_SCHEMA_VERSION:
             raise UnsupportedCheckpointVersion(version)
+        for field in ("input", "compatibility", "plan", "output", "progress", "artifacts", "ui_state"):
+            if field in data and not isinstance(data[field], dict):
+                raise CheckpointError(f"Checkpoint {field} must be a JSON object.")
         return data
 
     def save(self, data: dict[str, Any]) -> None:
@@ -81,6 +84,8 @@ class CheckpointStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as file:
                 json.dump(data, file, indent=2, sort_keys=True)
+                file.flush()
+                os.fsync(file.fileno())
             os.replace(temp_path, self.path)
         finally:
             if os.path.exists(temp_path):
@@ -142,11 +147,9 @@ def create_initial_checkpoint(
 
 
 def validate_artifact(path: str, expected_sha256: str | None) -> bool:
-    if not os.path.exists(path):
+    if not expected_sha256 or not os.path.isfile(path):
         return False
-    if expected_sha256:
-        try:
-            return sha256_file(path) == expected_sha256
-        except OSError:
-            return False
-    return True
+    try:
+        return sha256_file(path) == expected_sha256
+    except OSError:
+        return False

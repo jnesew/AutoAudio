@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from core.checkpoint import CheckpointStore, UnsupportedCheckpointVersion, create_initial_checkpoint
+from core.checkpoint import CheckpointStore, UnsupportedCheckpointVersion, CheckpointError, create_initial_checkpoint, validate_artifact
 
 
 def test_checkpoint_v2_round_trip(tmp_path):
@@ -45,3 +46,28 @@ def test_checkpoint_v1_is_explicitly_incompatible(tmp_path):
 
     with pytest.raises(UnsupportedCheckpointVersion, match="Start a new run"):
         store.load()
+
+
+def test_checkpoint_write_failure_preserves_previous_file_and_cleans_temporary_file(tmp_path):
+    store = CheckpointStore(tmp_path)
+    store.save({"version": 2, "status": "cancelled"})
+    original = store.path.read_bytes()
+    with patch("core.checkpoint.os.fsync", side_effect=OSError("disk failure")):
+        with pytest.raises(OSError, match="disk failure"):
+            store.save({"version": 2, "status": "running"})
+    assert store.path.read_bytes() == original
+    assert not list(tmp_path.glob(".checkpoint.*.tmp"))
+
+
+@pytest.mark.parametrize("field", ("input", "compatibility", "plan", "output", "progress", "artifacts", "ui_state"))
+def test_wrong_checkpoint_field_shapes_are_rejected(tmp_path, field):
+    store = CheckpointStore(tmp_path)
+    store.save({"version": 2, field: []})
+    with pytest.raises(CheckpointError, match=field):
+        store.load()
+
+
+def test_unhashed_artifact_is_not_trusted_for_resume(tmp_path):
+    audio = tmp_path / "audio.flac"
+    audio.write_bytes(b"data without integrity evidence")
+    assert not validate_artifact(str(audio), None)

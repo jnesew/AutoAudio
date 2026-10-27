@@ -4,19 +4,34 @@ import re
 from dataclasses import dataclass
 
 
-QWEN_SEGMENT_PLANNER_VERSION = "qwen-semantic-v1"
+QWEN_SEGMENT_PLANNER_VERSION = "qwen-unicode-limits-v2"
+_CJK_CHARACTERS = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af\U00020000-\U000323af]")
 
 
 @dataclass(frozen=True)
 class SegmentPolicy:
     target_words: int
     max_words: int
+    max_chars: int = 2400
+    max_bytes: int = 7200
 
     def __post_init__(self) -> None:
         if self.target_words <= 0 or self.max_words <= 0:
             raise ValueError("Segment word limits must be positive.")
         if self.target_words > self.max_words:
             raise ValueError("Segment target_words cannot exceed max_words.")
+        if self.max_chars < 1 or self.max_bytes < 4:
+            raise ValueError("Segment max_chars must be positive and max_bytes must be at least 4.")
+
+    def accepts(self, text: str) -> bool:
+        return (
+            len(text.split()) <= self.max_words
+            and len(text) <= self.max_chars
+            and len(text.encode("utf-8")) <= self.max_bytes
+            # A whitespace word can contain an entire CJK chapter. Keep a
+            # conservative character budget tied to the requested word budget.
+            and len(_CJK_CHARACTERS.findall(text)) <= self.max_words * 2
+        )
 
 
 def default_segment_policy(voice_mode: str) -> SegmentPolicy:
@@ -62,29 +77,60 @@ def _split_oversized_sentence(sentence: str, max_words: int) -> list[str]:
     return units
 
 
+def _bounded_units(text: str, policy: SegmentPolicy) -> list[str]:
+    """Split oversized runs without dropping Unicode code points or punctuation."""
+    pieces: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + policy.max_chars)
+        # Length, UTF-8 size, word count, and CJK count are monotone for prefixes.
+        # Search the longest safe prefix without repeatedly trimming the tail.
+        if not policy.accepts(text[start:end]):
+            low, high = start + 1, end
+            while low < high:
+                middle = (low + high + 1) // 2
+                if policy.accepts(text[start:middle]):
+                    low = middle
+                else:
+                    high = middle - 1
+            end = low
+        if end < len(text):
+            boundary = text.rfind(" ", start, end + 1)
+            if boundary > start:
+                end = boundary
+        pieces.append(text[start:end].strip())
+        start = end
+        while start < len(text) and text[start].isspace():
+            start += 1
+    return pieces
+
+
 def segment_text_for_qwen(text: str, policy: SegmentPolicy) -> list[str]:
-    """Create sentence-aware Qwen calls with a strict word-count ceiling."""
+    """Create sentence-aware calls with word, character, and UTF-8 ceilings."""
     normalized = re.sub(r"\s+", " ", text).strip()
     if not normalized:
         return []
 
-    sentences = re.split(r"(?<=[.!?…])\s+", normalized)
+    sentences = re.split(r"(?<=[.!?…])\s+|(?<=[。！？])(?=\S)", normalized)
     units: list[str] = []
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
             continue
-        if len(sentence.split()) <= policy.max_words:
-            units.append(sentence)
-        else:
-            units.extend(_split_oversized_sentence(sentence, policy.max_words))
+        word_units = (
+            [sentence] if len(sentence.split()) <= policy.max_words
+            else _split_oversized_sentence(sentence, policy.max_words)
+        )
+        for unit in word_units:
+            units.extend(_bounded_units(unit, policy))
 
     segments: list[str] = []
     current: list[str] = []
     current_words = 0
     for unit in units:
         unit_words = len(unit.split())
-        if current and (current_words >= policy.target_words or current_words + unit_words > policy.max_words):
+        candidate = " ".join([*current, unit])
+        if current and (current_words >= policy.target_words or not policy.accepts(candidate)):
             segments.append(" ".join(current))
             current = []
             current_words = 0

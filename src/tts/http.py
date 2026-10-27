@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from core.cancellation import CancellationToken
+from core.http_io import ResponseTooLarge, read_response_bytes
 from core.config import TTSConfig
 from core.errors import PipelineCancelled
 from tts.base import (
@@ -28,6 +29,8 @@ from tts.base import (
 
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_ELEVENLABS_BASE_URL = "https://api.elevenlabs.io"
+MAX_AUDIO_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_DISCOVERY_RESPONSE_BYTES = 2 * 1024 * 1024
 _RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 _AUDIO_CONTENT_TYPES = {
     "application/octet-stream",
@@ -106,38 +109,63 @@ class _HTTPProvider:
         timeout_seconds: float | None,
         cancellation: CancellationToken | None = None,
         attempts: int = 3,
+        maximum_bytes: int = MAX_AUDIO_RESPONSE_BYTES,
     ) -> tuple[bytes, str]:
         timeout = _bounded_timeout(timeout_seconds)
+        deadline = time.monotonic() + timeout
+        read_only = request.get_method() in {"GET", "HEAD"}
+
+        def backoff(attempt):
+            delay = min(0.5 * (2 ** attempt), 2.0)
+            while delay > 0:
+                if cancellation:
+                    cancellation.raise_if_cancelled()
+                if time.monotonic() >= deadline:
+                    raise TTSConnectionError("TTS request exceeded its total deadline.")
+                interval = min(delay, 0.1)
+                self._sleep(interval)
+                delay -= interval
+
         for attempt in range(max(1, attempts)):
             if cancellation:
                 cancellation.raise_if_cancelled()
             try:
-                with self._urlopen(request, timeout=timeout) as response:
-                    payload = response.read()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TTSConnectionError("TTS request exceeded its total deadline.")
+                with self._urlopen(request, timeout=remaining) as response:
+                    payload = read_response_bytes(
+                        response, maximum_bytes=maximum_bytes, cancellation=cancellation, deadline=deadline,
+                    )
                     content_type = _content_type(response)
                 if cancellation:
                     cancellation.raise_if_cancelled()
                 return payload, content_type
             except urllib.error.HTTPError as exc:
                 try:
-                    payload = exc.read()
+                    payload = exc.read(8192)
                 except Exception:
                     payload = b""
-                if exc.code in _RETRYABLE_HTTP_STATUS and attempt + 1 < attempts:
+                # Retrying accepted synthesis after a 5xx/read failure can
+                # duplicate generation. Only explicit rate rejection is retried
+                # for POST; read-only discovery can retry transient failures.
+                if exc.code in _RETRYABLE_HTTP_STATUS and (read_only or exc.code == 429) and attempt + 1 < attempts:
                     if cancellation:
                         cancellation.raise_if_cancelled()
-                    self._sleep(min(0.5 * (2**attempt), 2.0))
+                    backoff(attempt)
                     continue
                 raise TTSConnectionError(
                     f"TTS endpoint returned HTTP {exc.code}: {_error_detail(payload)}"
                 ) from exc
             except PipelineCancelled:
                 raise
+            except ResponseTooLarge as exc:
+                raise TTSProtocolError(str(exc)) from exc
             except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
-                if attempt + 1 < attempts:
+                if read_only and attempt + 1 < attempts:
                     if cancellation:
                         cancellation.raise_if_cancelled()
-                    self._sleep(min(0.5 * (2**attempt), 2.0))
+                    backoff(attempt)
                     continue
                 reason = getattr(exc, "reason", exc)
                 raise TTSConnectionError(f"TTS endpoint request failed: {reason}") from exc
@@ -349,6 +377,7 @@ class ElevenLabsSpeechProvider(_HTTPProvider):
                 request,
                 timeout_seconds=timeout_seconds,
                 attempts=2,
+                maximum_bytes=MAX_DISCOVERY_RESPONSE_BYTES,
             )
             if content_type and content_type != "application/json" and not content_type.endswith("+json"):
                 raise TTSProtocolError(

@@ -122,10 +122,7 @@ def refresh_ai_marking_manifest_hash(artifact_path: str | Path) -> Path:
     if not artifact.is_file():
         raise ValueError(f"Cannot refresh watermark manifest for missing artifact: {artifact}")
     manifest_path = manifest_path_for(artifact)
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Cannot refresh unreadable watermark manifest {manifest_path}: {exc}") from exc
+    payload = load_ai_marking_manifest(manifest_path)
     if payload.get("schema") != AI_MARKING_SCHEMA or payload.get("artifact") != artifact.name:
         raise ValueError(f"Cannot refresh incompatible watermark manifest: {manifest_path}")
 
@@ -134,6 +131,26 @@ def refresh_ai_marking_manifest_hash(artifact_path: str | Path) -> Path:
     payload["artifact_hash_updated_at_utc"] = datetime.now(timezone.utc).isoformat()
     _write_manifest_payload(manifest_path, payload)
     return manifest_path
+
+
+def load_ai_marking_manifest(manifest_path: str | Path) -> dict:
+    path = Path(manifest_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Watermark manifest is unreadable: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Manifest root must be a JSON object.")
+    methods = payload.get("marking_methods")
+    if not isinstance(methods, dict):
+        raise ValueError("Manifest marking_methods must be a JSON object.")
+    watermark = methods.get("audio_watermark")
+    if not isinstance(watermark, dict):
+        raise ValueError("Manifest audio_watermark must be a JSON object.")
+    for field in ("applied", "verified"):
+        if not isinstance(watermark.get(field), bool):
+            raise ValueError(f"Manifest audio_watermark.{field} must be a boolean.")
+    return payload
 
 
 def validate_watermarked_artifact(artifact_path: str | Path) -> WatermarkEvidence:
@@ -145,10 +162,7 @@ def validate_watermarked_artifact(artifact_path: str | Path) -> WatermarkEvidenc
     if not manifest_path.is_file():
         raise ValueError(f"Watermark manifest is missing: {manifest_path}")
 
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Watermark manifest is unreadable: {manifest_path}: {exc}") from exc
+    payload = load_ai_marking_manifest(manifest_path)
 
     if payload.get("schema") != AI_MARKING_SCHEMA:
         raise ValueError(f"Unsupported watermark manifest schema: {payload.get('schema')!r}")

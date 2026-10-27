@@ -12,7 +12,7 @@ AutoAudio routes synthesis through a small provider interface. The audiobook pip
 
 Provider construction, selection, configuration editing, checkpoint restoration, and GUI startup perform no endpoint requests. There are only two TTS request triggers:
 
-1. The user starts or resumes a conversion. Each planned narration/disclosure segment is then synthesized as part of that requested job.
+1. The user starts or resumes a conversion, or presses **Generate short sample**. Each planned narration/disclosure segment is then synthesized as part of that requested job.
 2. The user presses **Discover voices** or invokes `--discover-voices`. Discovery is never run as a provider probe or selection side effect.
 
 The GUI enables remote discovery only for ElevenLabs. ComfyUI speakers are already bundled locally. OpenAI-compatible implementations vary and have no portable voice-list API, so their voice IDs remain manual.
@@ -62,6 +62,20 @@ autoaudio \
 ```
 
 The adapter implements no upload, instant-clone, professional-clone, or voice-creation route. Discovery also filters clone categories from its result set.
+
+## Request recovery and limits
+
+HTTP audio responses are read in chunks with a 64 MiB ceiling; remote voice-list responses have a 2 MiB ceiling. Cancellation and the shared request deadline are checked between reads and retry backoff steps. A blocking connection/header wait is still bounded by the configured socket timeout; this is not an immediate network abort.
+
+Read-only discovery can retry transient failures. Synthesis POSTs retry only an explicit HTTP 429 rejection. Ambiguous read/network failures and server errors are reported without automatic resubmission, because the provider may already have accepted or generated the audio. Check provider state before manually retrying an ambiguous synthesis failure.
+
+## External runtime reproducibility
+
+Checkpoint settings and workflow hashes identify the request configuration. An external server can
+change its model weights or implementation while keeping the same URL and workflow, so those hashes
+alone do not prove identical speech generation. Keep the server, models, and node revisions stable
+across a resumable job. Explicit backend version metadata can be recorded when supplied by the workflow;
+AutoAudio does not query exploratory version endpoints when it is absent.
 
 ## Adding another provider
 

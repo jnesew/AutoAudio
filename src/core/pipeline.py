@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import hashlib
 import logging
 import os
@@ -68,9 +69,25 @@ from core.narration_text import (
     load_replacement_rules,
     replacement_rules_payload,
 )
-from core.plan import BookPlan, BookPlanError, BookPlanStore, PlannedChapter, PlannedSegment
+from core.narration_selection import (
+    apply_chapter_choices,
+    generation_settings,
+    segment_policy_for,
+    selection_payload,
+)
+from core.plan import (
+    BookPlan,
+    BookPlanError,
+    BookPlanStore,
+    PlannedChapter,
+    PlannedSegment,
+)
 from core.progress import ProgressTracker, ProgressUpdate
-from core.segmentation import SegmentPolicy, default_segment_policy, segment_text_for_qwen
+from core.segmentation import (
+    SegmentPolicy,
+    default_segment_policy,
+    segment_text_for_qwen,
+)
 from core.version import default_claim_generator, runtime_autoaudio_version
 from metadata.epub_parser import (
     EPUB_PARSER_POLICY_VERSION,
@@ -119,7 +136,9 @@ DEFAULT_SEGMENT_GAP_MS = 150
 DEFAULT_CHAPTER_GAP_MS = 1000
 
 
-def extract_text_blocks_from_epub(epub_path: str, *, narrate_toc: bool = False) -> list[tuple[str, str]]:
+def extract_text_blocks_from_epub(
+    epub_path: str, *, narrate_toc: bool = False
+) -> list[tuple[str, str]]:
     if not os.path.exists(epub_path):
         print(f"ERROR: File not found: {epub_path}")
         return []
@@ -153,9 +172,19 @@ def _extract_text_blocks_with_toc_info(
 
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
 
-    raw_paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n+", raw) if paragraph.strip()]
-    toc_indexes = frozenset() if narrate_toc else high_confidence_plain_text_toc_indexes(raw_paragraphs)
-    paragraphs = [re.sub(r"\s+", " ", paragraph).strip() for paragraph in raw_paragraphs]
+    raw_paragraphs = [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n+", raw)
+        if paragraph.strip()
+    ]
+    toc_indexes = (
+        frozenset()
+        if narrate_toc
+        else high_confidence_plain_text_toc_indexes(raw_paragraphs)
+    )
+    paragraphs = [
+        re.sub(r"\s+", " ", paragraph).strip() for paragraph in raw_paragraphs
+    ]
 
     blocks: list[tuple[str, str]] = []
     for i, paragraph in enumerate(paragraphs):
@@ -167,7 +196,9 @@ def _extract_text_blocks_with_toc_info(
     return blocks, len(toc_indexes)
 
 
-def group_blocks_into_chapters(blocks: list[tuple[str, str]], pages_per_chapter: int) -> list[tuple[str, str]]:
+def group_blocks_into_chapters(
+    blocks: list[tuple[str, str]], pages_per_chapter: int
+) -> list[tuple[str, str]]:
     if pages_per_chapter < 1:
         pages_per_chapter = 1
 
@@ -187,7 +218,9 @@ def group_blocks_into_chapters(blocks: list[tuple[str, str]], pages_per_chapter:
 
 
 def group_paragraphs_into_chapters(
-    blocks: list[tuple[str, str]], target_words_per_chapter: int = 2500, min_paragraphs_per_chapter: int = 3
+    blocks: list[tuple[str, str]],
+    target_words_per_chapter: int = 2500,
+    min_paragraphs_per_chapter: int = 3,
 ) -> list[tuple[str, str]]:
     if target_words_per_chapter < 1:
         target_words_per_chapter = 2500
@@ -201,7 +234,11 @@ def group_paragraphs_into_chapters(
     for title, text in blocks:
         words = len(text.split())
 
-        should_cut = current and current_words >= target_words_per_chapter and len(current) >= min_paragraphs_per_chapter
+        should_cut = (
+            current
+            and current_words >= target_words_per_chapter
+            and len(current) >= min_paragraphs_per_chapter
+        )
         if should_cut:
             chapter_num = len(chapters) + 1
             combined = " ".join(t for _, t in current).strip()
@@ -227,11 +264,13 @@ def build_qwen_book_plan(
     settings_hash: str,
     workflow_hash: str,
     segment_policy: SegmentPolicy,
+    excluded_chapters: tuple[int, ...] = (),
 ) -> BookPlan:
     """Freeze Qwen-aware semantic segments so a run cannot drift on resume."""
     planned_chapters: list[PlannedChapter] = []
     for chapter_index, (title, text) in enumerate(chapters):
-        segment_texts = segment_text_for_qwen(text, segment_policy)
+        excluded = chapter_index + 1 in excluded_chapters
+        segment_texts = [] if excluded else segment_text_for_qwen(text, segment_policy)
 
         planned_chapters.append(
             PlannedChapter(
@@ -245,7 +284,7 @@ def build_qwen_book_plan(
                     )
                     for segment_index, segment_text in enumerate(segment_texts)
                 ),
-                skipped_reason=None,
+                skipped_reason="Excluded by user" if excluded else None,
             )
         )
 
@@ -276,7 +315,9 @@ def process_segment(
         )
         return artifact.content, artifact.extension
     except ClientTTSConfigurationError as exc:
-        raise InputValidationError(f"Invalid TTS provider configuration: {exc}") from exc
+        raise InputValidationError(
+            f"Invalid TTS provider configuration: {exc}"
+        ) from exc
     except ClientTTSConnectionError as exc:
         raise TTSConnectionError(str(exc)) from exc
     except ClientTTSProtocolError as exc:
@@ -322,7 +363,9 @@ def write_watermarked_audio_artifact(
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError as exc:
-        raise PipelineRuntimeError(f"Error encoding watermarked audio artifact {output_path}: {exc}") from exc
+        raise PipelineRuntimeError(
+            f"Error encoding watermarked audio artifact {output_path}: {exc}"
+        ) from exc
 
     write_ai_marking_manifest(
         output_path,
@@ -345,21 +388,24 @@ def ensure_disclosure_asset(
     watermark_device: str,
     logger: logging.Logger,
     cancellation: CancellationToken | None = None,
+    phase_callback: Callable[[str], None] | None = None,
 ) -> str:
     if cancellation:
         cancellation.raise_if_cancelled()
     state_dir.mkdir(parents=True, exist_ok=True)
     disclosure = checkpoint.setdefault("artifacts", {}).setdefault("disclosure", {})
     manifest_path = disclosure.get("manifest_path", "")
-    if validate_artifact(disclosure.get("path", ""), disclosure.get("sha256")) and validate_artifact(
-        manifest_path, disclosure.get("manifest_sha256")
-    ):
+    if validate_artifact(
+        disclosure.get("path", ""), disclosure.get("sha256")
+    ) and validate_artifact(manifest_path, disclosure.get("manifest_sha256")):
         try:
             validate_watermarked_artifact(disclosure["path"])
             return str(disclosure["path"])
         except ValueError:
             remove_artifact_and_manifest(disclosure.get("path", ""))
 
+    if phase_callback:
+        phase_callback("Synthesizing disclosure")
     audio_data, _audio_ext = process_segment(
         text_segment=CHAPTER_DISCLOSURE_TEXT,
         speech_provider=speech_provider,
@@ -368,10 +414,14 @@ def ensure_disclosure_asset(
         cancellation=cancellation,
     )
     if not audio_data or len(audio_data) <= 16:
-        raise TTSProtocolError("Chapter disclosure generation returned an invalid audio payload.")
+        raise TTSProtocolError(
+            "Chapter disclosure generation returned an invalid audio payload."
+        )
 
     output_path = state_dir / "chapter_disclosure.flac"
     content_id = "autoaudio_chapter_disclosure_v1"
+    if phase_callback:
+        phase_callback("Watermarking disclosure")
     write_watermarked_audio_artifact(
         audio_data=audio_data,
         output_path=output_path,
@@ -387,7 +437,9 @@ def ensure_disclosure_asset(
         "manifest_path": str(sidecar_path),
         "manifest_sha256": sha256_file(sidecar_path),
         "policy_version": CHAPTER_DISCLOSURE_POLICY_VERSION,
-        "text_sha256": hashlib.sha256(CHAPTER_DISCLOSURE_TEXT.encode("utf-8")).hexdigest(),
+        "text_sha256": hashlib.sha256(
+            CHAPTER_DISCLOSURE_TEXT.encode("utf-8")
+        ).hexdigest(),
     }
     checkpoint_store.save(checkpoint)
     return str(output_path)
@@ -427,7 +479,9 @@ def _marked_checkpoint_artifact_is_valid(record: dict | None) -> bool:
     if not record:
         return False
     path = record.get("path", "")
-    manifest_path = record.get("manifest_path", str(manifest_path_for(path)) if path else "")
+    manifest_path = record.get(
+        "manifest_path", str(manifest_path_for(path)) if path else ""
+    )
     if not validate_artifact(path, record.get("sha256")) or not validate_artifact(
         manifest_path, record.get("manifest_sha256")
     ):
@@ -464,7 +518,9 @@ def _completed_progress_keys(book_plan: BookPlan, checkpoint: dict) -> set[str]:
             continue
         try:
             part_index = int(raw_part_index)
-            chapter_indexes = {int(value) for value in record.get("chapter_indexes", [])}
+            chapter_indexes = {
+                int(value) for value in record.get("chapter_indexes", [])
+            }
         except (TypeError, ValueError):
             continue
         completed.add(ProgressTracker.part_key(part_index))
@@ -477,9 +533,15 @@ def _completed_progress_keys(book_plan: BookPlan, checkpoint: dict) -> set[str]:
         if chapter.skipped_reason:
             continue
         chapter_key = str(chapter.index)
-        chapter_is_valid = _marked_checkpoint_artifact_is_valid(chapter_artifacts.get(chapter_key))
-        master_is_valid = _marked_checkpoint_artifact_is_valid(chapter_masters.get(chapter_key))
-        fully_reusable = master_is_valid or (chapter.index in completed_part_chapters and chapter_is_valid)
+        chapter_is_valid = _marked_checkpoint_artifact_is_valid(
+            chapter_artifacts.get(chapter_key)
+        )
+        master_is_valid = _marked_checkpoint_artifact_is_valid(
+            chapter_masters.get(chapter_key)
+        )
+        fully_reusable = master_is_valid or (
+            chapter.index in completed_part_chapters and chapter_is_valid
+        )
 
         if fully_reusable:
             completed.update(
@@ -488,8 +550,12 @@ def _completed_progress_keys(book_plan: BookPlan, checkpoint: dict) -> set[str]:
             )
         else:
             for segment in chapter.segments:
-                if _marked_checkpoint_artifact_is_valid(segment_artifacts.get(segment.id)):
-                    completed.add(ProgressTracker.segment_key(chapter.index, segment.index))
+                if _marked_checkpoint_artifact_is_valid(
+                    segment_artifacts.get(segment.id)
+                ):
+                    completed.add(
+                        ProgressTracker.segment_key(chapter.index, segment.index)
+                    )
 
         if chapter_is_valid and fully_reusable:
             completed.add(ProgressTracker.chapter_key(chapter.index))
@@ -506,7 +572,9 @@ def _cleanup_chapter_segment_artifacts(
     chapter_prefix = f"{chapter_index}:"
     segment_artifacts = checkpoint["artifacts"]["segments"]
     for segment_key, record in list(segment_artifacts.items()):
-        if record.get("chapter_index") != chapter_index and not segment_key.startswith(chapter_prefix):
+        if record.get("chapter_index") != chapter_index and not segment_key.startswith(
+            chapter_prefix
+        ):
             continue
         remove_artifact_and_manifest(record.get("path", ""))
         segment_artifacts.pop(segment_key, None)
@@ -532,7 +600,8 @@ def _extract_provenance_runtime_metadata(
     reported_backend_version = meta.get("version") if isinstance(meta, dict) else None
     backend_version = (
         str(reported_backend_version).strip()
-        if reported_backend_version is not None and str(reported_backend_version).strip()
+        if reported_backend_version is not None
+        and str(reported_backend_version).strip()
         else "unreported"
     )
 
@@ -546,7 +615,9 @@ def _extract_provenance_runtime_metadata(
     )
 
 
-def _provider_provenance_runtime_metadata(speech_provider: SpeechProvider) -> ProvenanceRuntimeMetadata:
+def _provider_provenance_runtime_metadata(
+    speech_provider: SpeechProvider,
+) -> ProvenanceRuntimeMetadata:
     identity = speech_provider.identity
     return ProvenanceRuntimeMetadata(
         model_name=identity.model_name,
@@ -565,7 +636,9 @@ def extract_cover_art(epub_path: str, output_dir: str):
             print(f"   [Cover Art] Extracted: {cover_path}")
         return cover_path
     except Exception as exc:
-        logging.getLogger("autoaudio.run").warning("Cover art extraction failed: %s", exc)
+        logging.getLogger("autoaudio.run").warning(
+            "Cover art extraction failed: %s", exc
+        )
 
     return None
 
@@ -578,18 +651,24 @@ def resolve_metadata(
     *,
     parsed_epub: ParsedEpub | None = None,
 ) -> BookMetadata:
-    fallback = BookMetadata(title=os.path.splitext(os.path.basename(input_book))[0], author="Unknown")
+    fallback = BookMetadata(
+        title=os.path.splitext(os.path.basename(input_book))[0], author="Unknown"
+    )
 
     if source_mode == "epub":
         try:
             parsed_epub = parsed_epub or parse_epub(input_book)
             embedded = parsed_epub.metadata
         except Exception as exc:
-            raise MetadataExtractionError(f"Embedded EPUB metadata extraction failed for {input_book}: {exc}") from exc
+            raise MetadataExtractionError(
+                f"Embedded EPUB metadata extraction failed for {input_book}: {exc}"
+            ) from exc
         try:
             cover = write_cover_art(parsed_epub, output_dir)
         except Exception as exc:
-            logging.getLogger("autoaudio.run").warning("Cover art extraction failed: %s", exc)
+            logging.getLogger("autoaudio.run").warning(
+                "Cover art extraction failed: %s", exc
+            )
             cover = None
         if cover:
             print(f"   [Cover Art] Extracted: {cover}")
@@ -608,22 +687,44 @@ def resolve_metadata(
             try:
                 fetched = fetch_gutenberg_metadata(gutenberg_id)
             except Exception as exc:
-                raise MetadataExtractionError(f"Online metadata fetch failed for Gutenberg ID {gutenberg_id}: {exc}") from exc
+                raise MetadataExtractionError(
+                    f"Online metadata fetch failed for Gutenberg ID {gutenberg_id}: {exc}"
+                ) from exc
             print(f"   [Metadata] Fetched metadata for Gutenberg ID {gutenberg_id}")
         else:
-            print("   [Metadata] Fetch requested but no Gutenberg ID could be inferred.")
+            print(
+                "   [Metadata] Fetch requested but no Gutenberg ID could be inferred."
+            )
 
     user = BookMetadata(title=args.title, author=args.author)
-    merged = merge_metadata(MetadataSources(user=user, embedded=embedded, fetched=fetched, fallback=fallback))
-    print(f"   [Metadata] Title='{merged.title}' Author='{merged.author}' Language='{merged.language or 'unknown'}'")
+    merged = merge_metadata(
+        MetadataSources(
+            user=user, embedded=embedded, fetched=fetched, fallback=fallback
+        )
+    )
+    print(
+        f"   [Metadata] Title='{merged.title}' Author='{merged.author}' Language='{merged.language or 'unknown'}'"
+    )
     return merged
 
 
 def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate audiobook audio from EPUB or plain text using selectable TTS providers.")
-    parser.add_argument("--input-book", default=str(project_root / "pg35-images-3.epub"), help="Path to the input EPUB/TXT/MD file.")
-    parser.add_argument("--output-dir", default=str(project_root / "audiobook_output"), help="Directory for generated audio.")
-    parser.add_argument("--source-mode", choices=["auto", "epub", "text"], default="auto")
+    parser = argparse.ArgumentParser(
+        description="Generate audiobook audio from EPUB or plain text using selectable TTS providers."
+    )
+    parser.add_argument(
+        "--input-book",
+        default=str(project_root / "pg35-images-3.epub"),
+        help="Path to the input EPUB/TXT/MD file.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(project_root / "audiobook_output"),
+        help="Directory for generated audio.",
+    )
+    parser.add_argument(
+        "--source-mode", choices=["auto", "epub", "text"], default="auto"
+    )
     parser.add_argument("--pages-per-chapter", type=int, default=1)
     parser.add_argument("--target-words-per-chapter", type=int, default=2500)
     parser.add_argument("--min-paragraphs-per-chapter", type=int, default=3)
@@ -635,6 +736,22 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Narrate confidently identified table-of-contents documents/blocks (disabled by default).",
+    )
+    parser.add_argument(
+        "--exclude-chapter",
+        dest="excluded_chapters",
+        type=int,
+        action="append",
+        default=[],
+        help="Exclude a one-based chapter number after grouping (repeatable).",
+    )
+    parser.add_argument(
+        "--chapter-text-override",
+        dest="chapter_text_overrides",
+        type=json.loads,
+        action="append",
+        default=[],
+        help='Spoken text after replacement rules, as JSON {"chapter": 1, "text": "..."} (repeatable).',
     )
     parser.add_argument(
         "--replacement-file",
@@ -674,7 +791,11 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         default=None,
         help="Override the selected preset profile's built-in Qwen speaker.",
     )
-    parser.add_argument("--voice-instruct", default=None, help="Override the selected profile's voice/style instruction.")
+    parser.add_argument(
+        "--voice-instruct",
+        default=None,
+        help="Override the selected profile's voice/style instruction.",
+    )
     parser.add_argument("--model-choice", choices=QWEN_MODEL_CHOICES, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--precision", default=None)
@@ -691,18 +812,38 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
     )
-    parser.add_argument("--output-format", choices=["flac", "mp3", "m4b"], default="flac")
+    parser.add_argument(
+        "--output-format", choices=["flac", "mp3", "m4b"], default="flac"
+    )
     parser.add_argument(
         "--watermark-device",
         choices=["auto", "cpu", "cuda"],
         default="auto",
         help="AudioSeal runtime device; auto tries CUDA/ROCm and falls back to CPU.",
     )
-    parser.add_argument("--fetch-metadata", action="store_true", help="Optional online metadata lookup (disabled by default).")
-    parser.add_argument("--gutenberg-id", default="", help="Optional explicit Gutenberg ID for online metadata fetch.")
-    parser.add_argument("--title", default="", help="Override audiobook title (highest metadata priority).")
-    parser.add_argument("--author", default="", help="Override audiobook author (highest metadata priority).")
-    parser.add_argument("--comfyui-mode", choices=["network", "spoof"], default="network")
+    parser.add_argument(
+        "--fetch-metadata",
+        action="store_true",
+        help="Optional online metadata lookup (disabled by default).",
+    )
+    parser.add_argument(
+        "--gutenberg-id",
+        default="",
+        help="Optional explicit Gutenberg ID for online metadata fetch.",
+    )
+    parser.add_argument(
+        "--title",
+        default="",
+        help="Override audiobook title (highest metadata priority).",
+    )
+    parser.add_argument(
+        "--author",
+        default="",
+        help="Override audiobook author (highest metadata priority).",
+    )
+    parser.add_argument(
+        "--comfyui-mode", choices=["network", "spoof"], default="network"
+    )
     parser.add_argument("--comfyui-server-address", default="127.0.0.1:8188")
     parser.add_argument(
         "--tts-timeout-seconds",
@@ -712,7 +853,9 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         default=None,
         help="TTS request timeout. The ComfyUI option name remains as a compatibility alias.",
     )
-    parser.add_argument("--tts-provider", choices=TTS_PROVIDER_CHOICES, default="comfyui")
+    parser.add_argument(
+        "--tts-provider", choices=TTS_PROVIDER_CHOICES, default="comfyui"
+    )
     parser.add_argument(
         "--tts-base-url",
         default="",
@@ -723,27 +866,59 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         default="AUTOAUDIO_TTS_API_KEY",
         help="Environment variable containing the provider API key; the key itself is never checkpointed.",
     )
-    parser.add_argument("--tts-model", default="", help="Model id for an HTTP TTS provider.")
-    parser.add_argument("--tts-voice", default="", help="Existing voice id for an HTTP TTS provider.")
-    parser.add_argument("--tts-response-format", default="", help="Provider response format; blank uses its default.")
-    parser.add_argument("--tts-language-code", default="", help="Optional provider language code such as en or fi.")
+    parser.add_argument(
+        "--tts-model", default="", help="Model id for an HTTP TTS provider."
+    )
+    parser.add_argument(
+        "--tts-voice", default="", help="Existing voice id for an HTTP TTS provider."
+    )
+    parser.add_argument(
+        "--tts-response-format",
+        default="",
+        help="Provider response format; blank uses its default.",
+    )
+    parser.add_argument(
+        "--tts-language-code",
+        default="",
+        help="Optional provider language code such as en or fi.",
+    )
     parser.add_argument(
         "--discover-voices",
         action="store_true",
         help="Explicitly request voice discovery for the selected provider, print results, and exit.",
     )
     parser.add_argument("--resume", choices=["auto", "yes", "no"], default="auto")
-    parser.add_argument("--provenance-enabled", action="store_true", help="Enable C2PA signing and embedding.")
-    parser.add_argument("--provenance-cert-path", default="", help="Path to X.509 certificate for C2PA signing.")
-    parser.add_argument("--provenance-key-path", default="", help="Path to private key for C2PA signing.")
-    parser.add_argument("--provenance-key-password", default="", help="Optional password for the provenance private key.")
+    parser.add_argument(
+        "--provenance-enabled",
+        action="store_true",
+        help="Enable C2PA signing and embedding.",
+    )
+    parser.add_argument(
+        "--provenance-cert-path",
+        default="",
+        help="Path to X.509 certificate for C2PA signing.",
+    )
+    parser.add_argument(
+        "--provenance-key-path",
+        default="",
+        help="Path to private key for C2PA signing.",
+    )
+    parser.add_argument(
+        "--provenance-key-password",
+        default="",
+        help="Optional password for the provenance private key.",
+    )
     parser.add_argument(
         "--provenance-failure-mode",
         choices=["soft-fail", "hard-fail"],
         default="soft-fail",
         help="When hard-fail, provenance errors stop the pipeline; soft-fail logs warning and continues.",
     )
-    parser.add_argument("--provenance-tool", default="c2patool", help="CLI tool used for C2PA embedding/signing.")
+    parser.add_argument(
+        "--provenance-tool",
+        default="c2patool",
+        help="CLI tool used for C2PA embedding/signing.",
+    )
     parser.add_argument(
         "--provenance-claim-generator",
         default=default_claim_generator(),
@@ -751,10 +926,18 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--comfyui-spoof-scenario",
-        choices=["success", "timeout", "malformed_history", "missing_view_payload", "connection_error"],
+        choices=[
+            "success",
+            "timeout",
+            "malformed_history",
+            "missing_view_payload",
+            "connection_error",
+        ],
         default="success",
     )
-    parser.add_argument("--gui", action="store_true", help="Launch the PySide6 desktop GUI.")
+    parser.add_argument(
+        "--gui", action="store_true", help="Launch the PySide6 desktop GUI."
+    )
     parser.add_argument(
         "--version",
         dest="version",
@@ -770,6 +953,24 @@ def run_pipeline(
     cancellation: CancellationToken | None = None,
     progress_callback: Callable[[ProgressUpdate], None] | None = None,
 ) -> None:
+    from core.job_lock import output_job_lock
+    from provenance.audio_watermark import audioseal_runtime_session
+
+    if not Path(args.input_book).is_file():
+        raise InputValidationError(f"Input book file not found: {args.input_book}")
+    with (
+        output_job_lock(config.state_dir_for(args.output_dir)),
+        audioseal_runtime_session(),
+    ):
+        _run_pipeline(args, config, cancellation, progress_callback)
+
+
+def _run_pipeline(
+    args: argparse.Namespace,
+    config: AppConfig,
+    cancellation: CancellationToken | None = None,
+    progress_callback: Callable[[ProgressUpdate], None] | None = None,
+) -> None:
     input_book = os.path.abspath(args.input_book)
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -779,16 +980,24 @@ def run_pipeline(
     logger.info("Pipeline started for input=%s output=%s", input_book, output_dir)
 
     gap_settings = {
-        "disclosure_gap_ms": getattr(args, "disclosure_gap_ms", DEFAULT_DISCLOSURE_GAP_MS),
+        "disclosure_gap_ms": getattr(
+            args, "disclosure_gap_ms", DEFAULT_DISCLOSURE_GAP_MS
+        ),
         "segment_gap_ms": getattr(args, "segment_gap_ms", DEFAULT_SEGMENT_GAP_MS),
         "chapter_gap_ms": getattr(args, "chapter_gap_ms", DEFAULT_CHAPTER_GAP_MS),
     }
     invalid_gap = next(
-        (name for name, duration_ms in gap_settings.items() if duration_ms < 0 or duration_ms > 60_000),
+        (
+            name
+            for name, duration_ms in gap_settings.items()
+            if duration_ms < 0 or duration_ms > 60_000
+        ),
         None,
     )
     if invalid_gap:
-        raise InputValidationError(f"{invalid_gap.replace('_', '-')} must be between 0 and 60000 milliseconds.")
+        raise InputValidationError(
+            f"{invalid_gap.replace('_', '-')} must be between 0 and 60000 milliseconds."
+        )
     disclosure_gap_ms = gap_settings["disclosure_gap_ms"]
     segment_gap_ms = gap_settings["segment_gap_ms"]
     chapter_gap_ms = gap_settings["chapter_gap_ms"]
@@ -799,35 +1008,26 @@ def run_pipeline(
         raise InputValidationError(str(exc)) from exc
 
     try:
-        raw_inline_replacement_rules = tuple(getattr(args, "replacement_rules", ()) or ())
-        inline_replacement_rules = load_replacement_rules(None, raw_inline_replacement_rules)
+        raw_inline_replacement_rules = tuple(
+            getattr(args, "replacement_rules", ()) or ()
+        )
+        inline_replacement_rules = load_replacement_rules(
+            None, raw_inline_replacement_rules
+        )
         replacement_rules = load_replacement_rules(
             getattr(args, "replacement_file", ""),
             raw_inline_replacement_rules,
         )
     except ReplacementRuleError as exc:
-        raise InputValidationError(f"Invalid narration replacement configuration: {exc}") from exc
+        raise InputValidationError(
+            f"Invalid narration replacement configuration: {exc}"
+        ) from exc
     narrate_toc = bool(getattr(args, "narrate_toc", False))
 
     try:
         narrator_catalog = NarratorCatalog.load(config.narrator_profiles_path)
         narrator_profile = narrator_catalog.get(args.narrator_profile)
-        settings = narrator_profile.with_overrides(
-            speaker=args.speaker,
-            instruct=args.voice_instruct,
-            model_choice=args.model_choice,
-            device=args.device,
-            precision=args.precision,
-            language=args.language,
-            seed=args.seed,
-            max_new_tokens=args.max_new_tokens,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            temperature=args.temperature,
-            repetition_penalty=args.repetition_penalty,
-            attention=args.attention,
-            unload_model_after_generate=args.unload_model_after_generate,
-        )
+        settings = generation_settings(args, narrator_profile)
     except NarratorProfileError as exc:
         raise InputValidationError(f"Invalid narrator profile: {exc}") from exc
 
@@ -848,20 +1048,11 @@ def run_pipeline(
         attention="sdpa",
         unload_model_after_generate=False,
     )
-    default_policy = default_segment_policy(settings.voice_mode)
     try:
-        segment_policy = SegmentPolicy(
-            target_words=(
-                args.target_words_per_segment
-                if args.target_words_per_segment is not None
-                else default_policy.target_words
-            ),
-            max_words=(
-                args.max_words_per_segment if args.max_words_per_segment is not None else default_policy.max_words
-            ),
-        )
+        segment_policy = segment_policy_for(args, settings)
+        chapter_choices = selection_payload(args)
     except ValueError as exc:
-        raise InputValidationError(f"Invalid Qwen segment settings: {exc}") from exc
+        raise InputValidationError(f"Invalid narration plan settings: {exc}") from exc
     workflow_template: dict | None = None
     disclosure_workflow_template: dict | None = None
     if config.tts.provider == "comfyui":
@@ -893,16 +1084,24 @@ def run_pipeline(
             disclosure_settings=disclosure_settings,
         )
     except TTSClientError as exc:
-        raise InputValidationError(f"Invalid TTS provider configuration: {exc}") from exc
+        raise InputValidationError(
+            f"Invalid TTS provider configuration: {exc}"
+        ) from exc
     if config.tts.provider != "comfyui":
         workflow_hash = stable_settings_hash(speech_provider.identity.compatibility)
     provenance_runtime_metadata = _provider_provenance_runtime_metadata(speech_provider)
     checkpoint_store = CheckpointStore(state_dir=state_dir)
     plan_store = BookPlanStore(state_dir=state_dir)
-    input_hash = sha256_file(input_book)
+    try:
+        input_hash = sha256_file(input_book)
+    except OSError as exc:
+        raise InputValidationError(f"Could not read input book: {exc}") from exc
     settings_identity = {
+        **chapter_choices,
         "source_mode": source_mode,
-        "source_parser_policy": EPUB_PARSER_POLICY_VERSION if source_mode == "epub" else "text-v1",
+        "source_parser_policy": EPUB_PARSER_POLICY_VERSION
+        if source_mode == "epub"
+        else "text-v1",
         "narration_text_policy": NARRATION_TEXT_POLICY_VERSION,
         "narrate_toc": narrate_toc,
         "replacement_rules": replacement_rules_payload(replacement_rules),
@@ -967,7 +1166,9 @@ def run_pipeline(
         checkpoint = checkpoint_store.load()
     except CheckpointError as exc:
         checkpoint_load_error = exc
-        logger.warning("Ignoring incompatible checkpoint for non-forced resume: %s", exc)
+        logger.warning(
+            "Ignoring incompatible checkpoint for non-forced resume: %s", exc
+        )
 
     can_resume = (
         checkpoint
@@ -982,7 +1183,27 @@ def run_pipeline(
 
     if args.resume == "yes" and not can_resume:
         detail = f" ({checkpoint_load_error})" if checkpoint_load_error else ""
-        raise ResumeStateError(f"Resume requested (--resume yes) but no compatible checkpoint state exists{detail}.")
+        raise ResumeStateError(
+            f"Resume requested (--resume yes) but no compatible checkpoint state exists{detail}."
+        )
+
+    # A new or incompatible run must never replace another job's recovery state
+    # or publishable audio. Cover/metadata previews and the log are harmless.
+    previous_work = (
+        checkpoint_store.path.exists()
+        or plan_store.path.exists()
+        or any(
+            path.is_file()
+            and path.suffix.lower()
+            in {".wav", ".flac", ".mp3", ".m4b", ".m4a", ".opus", ".mp4"}
+            for path in Path(output_dir).rglob("*")
+        )
+    )
+    if previous_work and not (can_resume and args.resume in {"auto", "yes"}):
+        raise ResumeStateError(
+            "The output directory already contains a job that this run cannot resume; existing work was preserved.",
+            remediation="Resume with the original input and settings, or choose a new output directory for this run.",
+        )
 
     book_plan: BookPlan | None = None
     if can_resume and args.resume in {"auto", "yes"}:
@@ -993,12 +1214,22 @@ def run_pipeline(
                 or book_plan.settings_sha256 != settings_hash
                 or book_plan.workflow_sha256 != workflow_hash
             ):
-                raise BookPlanError("Book plan compatibility fields do not match the current run.")
+                raise BookPlanError(
+                    "Book plan compatibility fields do not match the current run."
+                )
+            if any(
+                not segment_policy.accepts(segment.text)
+                for chapter in book_plan.chapters
+                for segment in chapter.segments
+            ):
+                raise BookPlanError(
+                    "A persisted segment exceeds current request-size safety limits."
+                )
         except BookPlanError as exc:
-            if args.resume == "yes":
-                raise ResumeStateError(f"Resume requested, but the persisted book plan is invalid: {exc}") from exc
-            logger.warning("Ignoring invalid book plan for automatic resume: %s", exc)
-            book_plan = None
+            raise ResumeStateError(
+                f"The persisted book plan is invalid; existing work was preserved: {exc}",
+                remediation="Restore the original plan/checkpoint, or choose a new output directory.",
+            ) from exc
 
     parsed_epub: ParsedEpub | None = None
     if source_mode == "epub":
@@ -1007,7 +1238,11 @@ def run_pipeline(
         except EpubParseError as exc:
             raise InputValidationError(str(exc)) from exc
         for diagnostic in parsed_epub.diagnostics:
-            log_method = logger.warning if diagnostic.severity in {"warning", "error", "fatal"} else logger.info
+            log_method = (
+                logger.warning
+                if diagnostic.severity in {"warning", "error", "fatal"}
+                else logger.info
+            )
             log_method(
                 "EPUB parser diagnostic code=%s resource=%s message=%s",
                 diagnostic.code,
@@ -1062,12 +1297,24 @@ def run_pipeline(
                 min_paragraphs_per_chapter=args.min_paragraphs_per_chapter,
             )
 
-        chapters, replacement_count = apply_rules_to_chapters(chapters, replacement_rules)
+        chapters, replacement_count = apply_rules_to_chapters(
+            chapters, replacement_rules
+        )
         if replacement_count:
-            logger.info("Applied %d narration text replacement(s) before segmentation.", replacement_count)
+            logger.info(
+                "Applied %d narration text replacement(s) before segmentation.",
+                replacement_count,
+            )
+
+        try:
+            chapters = apply_chapter_choices(chapters, chapter_choices)
+        except ValueError as exc:
+            raise InputValidationError(str(exc)) from exc
 
         if not chapters:
-            raise InputValidationError("No chapters found. Check the input file content/format and chapter grouping settings.")
+            raise InputValidationError(
+                "No chapters found. Check the input file content/format and chapter grouping settings."
+            )
 
         book_plan = build_qwen_book_plan(
             chapters,
@@ -1075,6 +1322,7 @@ def run_pipeline(
             settings_hash=settings_hash,
             workflow_hash=workflow_hash,
             segment_policy=segment_policy,
+            excluded_chapters=tuple(chapter_choices.get("excluded_chapters", [])),
         )
         plan_store.save(book_plan)
         checkpoint = create_initial_checkpoint(
@@ -1087,6 +1335,7 @@ def run_pipeline(
             output_dir=output_dir,
             output_format=args.output_format,
             ui_state={
+                **chapter_choices,
                 "input_book": args.input_book,
                 "output_dir": args.output_dir,
                 "source_mode": args.source_mode,
@@ -1098,7 +1347,9 @@ def run_pipeline(
                 "max_words_per_segment": segment_policy.max_words,
                 "narrate_toc": narrate_toc,
                 "replacement_file": getattr(args, "replacement_file", ""),
-                "replacement_rules": replacement_rules_payload(inline_replacement_rules),
+                "replacement_rules": replacement_rules_payload(
+                    inline_replacement_rules
+                ),
                 "narrator_profile": narrator_profile.id,
                 "speaker": settings.speaker,
                 "voice_instruct": settings.instruct,
@@ -1146,7 +1397,9 @@ def run_pipeline(
         checkpoint_store.save(checkpoint)
 
     print(f"--- Processing Book: {input_book} ---")
-    metadata = resolve_metadata(args, input_book, source_mode, output_dir, parsed_epub=parsed_epub)
+    metadata = resolve_metadata(
+        args, input_book, source_mode, output_dir, parsed_epub=parsed_epub
+    )
 
     progress = ProgressTracker(
         book_plan=book_plan,
@@ -1177,6 +1430,7 @@ def run_pipeline(
             watermark_device=args.watermark_device,
             logger=logger,
             cancellation=cancellation,
+            phase_callback=progress.report,
         )
         progress.complete(ProgressTracker.disclosure_key(), "Disclosure ready")
         disclosure_gap_file = ensure_silence_asset(
@@ -1202,14 +1456,23 @@ def run_pipeline(
         )
 
         completed_part_chapters: set[int] = set()
-        for stored_part_index, part_artifact in checkpoint["artifacts"]["parts"].items():
-            if not validate_artifact(part_artifact.get("path", ""), part_artifact.get("sha256")):
+        for stored_part_index, part_artifact in checkpoint["artifacts"][
+            "parts"
+        ].items():
+            if not validate_artifact(
+                part_artifact.get("path", ""), part_artifact.get("sha256")
+            ):
                 continue
             try:
-                stored_chapter_indexes = [int(index) for index in part_artifact.get("chapter_indexes", [])]
+                stored_chapter_indexes = [
+                    int(index) for index in part_artifact.get("chapter_indexes", [])
+                ]
                 part_index = max(part_index, int(stored_part_index) + 1)
             except (TypeError, ValueError):
-                logger.warning("Ignoring malformed completed-part checkpoint entry: %s", stored_part_index)
+                logger.warning(
+                    "Ignoring malformed completed-part checkpoint entry: %s",
+                    stored_part_index,
+                )
                 continue
             completed_part_chapters.update(stored_chapter_indexes)
 
@@ -1220,26 +1483,38 @@ def run_pipeline(
             title = chapter.title
             chapter_key = str(ch_idx)
             progress.report("Checking resume state", chapter_index=ch_idx)
-            chapter_artifact = checkpoint.get("artifacts", {}).get("chapters", {}).get(chapter_key)
+            chapter_artifact = (
+                checkpoint.get("artifacts", {}).get("chapters", {}).get(chapter_key)
+            )
             chapter_is_valid = bool(
                 chapter_artifact
-                and validate_artifact(chapter_artifact.get("path", ""), chapter_artifact.get("sha256"))
+                and validate_artifact(
+                    chapter_artifact.get("path", ""), chapter_artifact.get("sha256")
+                )
             )
-            master_artifact = checkpoint["artifacts"]["chapter_masters"].get(chapter_key)
+            master_artifact = checkpoint["artifacts"]["chapter_masters"].get(
+                chapter_key
+            )
             master_is_valid = _marked_checkpoint_artifact_is_valid(master_artifact)
 
             if ch_idx in completed_part_chapters and chapter_is_valid:
                 print(f"\nProcessing {title}")
-                print("   -> Resume skip: chapter belongs to an integrity-checked completed part.")
+                print(
+                    "   -> Resume skip: chapter belongs to an integrity-checked completed part."
+                )
                 progress.report("Resume skip", chapter_index=ch_idx)
                 continue
 
             if master_is_valid:
                 print(f"\nProcessing {title}")
                 if chapter_is_valid:
-                    print("   -> Resume skip: chapter and lossless master passed integrity checks.")
+                    print(
+                        "   -> Resume skip: chapter and lossless master passed integrity checks."
+                    )
                 else:
-                    print("   -> Resume encode: rebuilding chapter output from its lossless master.")
+                    print(
+                        "   -> Resume encode: rebuilding chapter output from its lossless master."
+                    )
                     progress.report("Encoding chapter", chapter_index=ch_idx)
                     chapter_filename = os.path.join(
                         output_dir,
@@ -1258,6 +1533,7 @@ def run_pipeline(
                         ai_provider=speech_provider.identity.provider_name,
                         logger=logger,
                         cancellation=cancellation,
+                        phase_callback=progress.report,
                     )
                 progress.complete(
                     ProgressTracker.chapter_key(ch_idx),
@@ -1289,8 +1565,11 @@ def run_pipeline(
                         logger,
                         cancellation,
                         ai_provider=speech_provider.identity.provider_name,
+                        phase_callback=progress.report,
                     )
-                    progress.complete(ProgressTracker.part_key(part_index), "Part complete")
+                    progress.complete(
+                        ProgressTracker.part_key(part_index), "Part complete"
+                    )
                     part_index += 1
                     part_chapter_files = []
                 continue
@@ -1321,7 +1600,9 @@ def run_pipeline(
                 )
 
                 segment_key = segment.id
-                segment_artifact = checkpoint.get("artifacts", {}).get("segments", {}).get(segment_key)
+                segment_artifact = (
+                    checkpoint.get("artifacts", {}).get("segments", {}).get(segment_key)
+                )
                 if _marked_checkpoint_artifact_is_valid(segment_artifact):
                     segment_files.append(segment_artifact["path"])
                     print(f"   -> Segment {seg_idx + 1}/{len(chunks)} resume hit [OK]")
@@ -1333,7 +1614,9 @@ def run_pipeline(
                     )
                     continue
 
-                print(f"   -> Generating Segment {seg_idx + 1}/{len(chunks)}...", end="\r")
+                print(
+                    f"   -> Generating Segment {seg_idx + 1}/{len(chunks)}...", end="\r"
+                )
                 audio_data, _audio_ext = process_segment(
                     text_segment=chunk,
                     speech_provider=speech_provider,
@@ -1345,11 +1628,18 @@ def run_pipeline(
                     cancellation.raise_if_cancelled()
 
                 if audio_data and len(audio_data) > 16:
-                    temp_filename = str(segment_cache_dir / f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}.flac")
+                    temp_filename = str(
+                        segment_cache_dir / f"temp_ch{ch_idx + 1}_seg{seg_idx + 1}.flac"
+                    )
 
-                    segment_title = safe_filename_component(title, fallback=f"Chapter {ch_idx + 1:03d}")
+                    segment_title = safe_filename_component(
+                        title, fallback=f"Chapter {ch_idx + 1:03d}"
+                    )
                     segment_content_id = f"{segment_title}_seg_{seg_idx + 1:03d}"
 
+                    progress.report(
+                        "Watermarking", chapter_index=ch_idx, segment_index=seg_idx
+                    )
                     write_watermarked_audio_artifact(
                         audio_data=audio_data,
                         output_path=temp_filename,
@@ -1364,11 +1654,20 @@ def run_pipeline(
                         "chapter_index": ch_idx,
                         "segment_index": seg_idx,
                     }
-                    checkpoint["progress"]["completed_segments"].setdefault(chapter_key, [])
-                    if seg_idx not in checkpoint["progress"]["completed_segments"][chapter_key]:
-                        checkpoint["progress"]["completed_segments"][chapter_key].append(seg_idx)
+                    checkpoint["progress"]["completed_segments"].setdefault(
+                        chapter_key, []
+                    )
+                    if (
+                        seg_idx
+                        not in checkpoint["progress"]["completed_segments"][chapter_key]
+                    ):
+                        checkpoint["progress"]["completed_segments"][
+                            chapter_key
+                        ].append(seg_idx)
                     checkpoint_store.save(checkpoint)
-                    print(f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [OK]   ")
+                    print(
+                        f"   -> Generated Segment {seg_idx + 1}/{len(chunks)} [OK]   "
+                    )
                     progress.complete(
                         ProgressTracker.segment_key(ch_idx, seg_idx),
                         "Narrating",
@@ -1385,14 +1684,21 @@ def run_pipeline(
                 print("   -> Chapter failed (no audio generated).")
                 continue
 
-            safe_title = safe_filename_component(title, fallback=f"Chapter {ch_idx + 1:03d}")
-            chapter_filename = os.path.join(output_dir, f"Chapter_{ch_idx + 1:03d}_{safe_title}.{args.output_format}")
+            safe_title = safe_filename_component(
+                title, fallback=f"Chapter {ch_idx + 1:03d}"
+            )
+            chapter_filename = os.path.join(
+                output_dir,
+                f"Chapter_{ch_idx + 1:03d}_{safe_title}.{args.output_format}",
+            )
             chapter_master = master_dir / f"chapter_{ch_idx + 1:03d}.flac"
 
             chapter_inputs = [disclosure_file]
             if disclosure_gap_file:
                 chapter_inputs.append(disclosure_gap_file)
-            chapter_inputs.extend(interleave_audio_files(segment_files, segment_gap_file))
+            chapter_inputs.extend(
+                interleave_audio_files(segment_files, segment_gap_file)
+            )
 
             print(f"   -> Assembling lossless chapter master for {chapter_filename}...")
             progress.report("Assembling chapter", chapter_index=ch_idx)
@@ -1406,10 +1712,12 @@ def run_pipeline(
                 logger=logger,
                 ai_provider=speech_provider.identity.provider_name,
             )
-            checkpoint["artifacts"]["chapter_masters"][chapter_key] = _marked_artifact_record(
-                chapter_master,
-                title=title,
-                chapter_index=ch_idx,
+            checkpoint["artifacts"]["chapter_masters"][chapter_key] = (
+                _marked_artifact_record(
+                    chapter_master,
+                    title=title,
+                    chapter_index=ch_idx,
+                )
             )
             checkpoint_store.save(checkpoint)
 
@@ -1429,6 +1737,7 @@ def run_pipeline(
                 ai_provider=speech_provider.identity.provider_name,
                 logger=logger,
                 cancellation=cancellation,
+                phase_callback=progress.report,
             )
             progress.complete(
                 ProgressTracker.chapter_key(ch_idx),
@@ -1464,6 +1773,7 @@ def run_pipeline(
                     logger,
                     cancellation,
                     ai_provider=speech_provider.identity.provider_name,
+                    phase_callback=progress.report,
                 )
                 progress.complete(ProgressTracker.part_key(part_index), "Part complete")
                 part_index += 1
@@ -1487,6 +1797,7 @@ def run_pipeline(
                 logger,
                 cancellation,
                 ai_provider=speech_provider.identity.provider_name,
+                phase_callback=progress.report,
             )
             progress.complete(ProgressTracker.part_key(part_index), "Part complete")
         checkpoint["status"] = "completed"
@@ -1500,7 +1811,9 @@ def run_pipeline(
         raise
     except Exception as exc:
         checkpoint["status"] = "failed"
-        checkpoint.setdefault("errors", []).append({"message": str(exc), "traceback": traceback.format_exc()})
+        checkpoint.setdefault("errors", []).append(
+            {"message": str(exc), "traceback": traceback.format_exc()}
+        )
         checkpoint_store.save(checkpoint)
         progress.report("Failed")
         logger.exception("Pipeline failed")
@@ -1519,7 +1832,9 @@ def run_pipeline(
             ),
         ):
             raise
-        raise PipelineRuntimeError(f"Unexpected pipeline failure. See debug log: {run_log_path}") from exc
+        raise PipelineRuntimeError(
+            f"Unexpected pipeline failure. See debug log: {run_log_path}"
+        ) from exc
 
     logger.info("Pipeline completed successfully")
     print("\nDone.")
@@ -1539,6 +1854,7 @@ def _publish_chapter_from_master(
     logger: logging.Logger,
     cancellation: CancellationToken | None = None,
     ai_provider: str = "ComfyUI",
+    phase_callback: Callable[[str], None] | None = None,
 ) -> None:
     chapter_meta = {
         "title": title,
@@ -1558,6 +1874,8 @@ def _publish_chapter_from_master(
     )
     if cancellation:
         cancellation.raise_if_cancelled()
+    if phase_callback and config.provenance.enabled:
+        phase_callback("Signing")
     provenance = apply_c2pa_with_policy(
         artifact_path=chapter_filename,
         config=config.provenance,
@@ -1566,7 +1884,9 @@ def _publish_chapter_from_master(
     )
     if provenance:
         if provenance.final_sha256 != sha256_file(chapter_filename):
-            raise PipelineRuntimeError(f"C2PA final artifact hash mismatch for {chapter_filename}.")
+            raise PipelineRuntimeError(
+                f"C2PA final artifact hash mismatch for {chapter_filename}."
+            )
         refresh_ai_marking_manifest_hash(chapter_filename)
     chapter_record = _marked_artifact_record(
         chapter_filename,
@@ -1581,7 +1901,11 @@ def _publish_chapter_from_master(
             "source_sha256": provenance.source_sha256,
             "final_sha256": provenance.final_sha256,
         }
-        logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", chapter_filename, provenance.manifest_id)
+        logger.info(
+            "Checkpointed C2PA manifest artifact=%s manifest_id=%s",
+            chapter_filename,
+            provenance.manifest_id,
+        )
     if chapter_index not in checkpoint["progress"]["completed_chapters"]:
         checkpoint["progress"]["completed_chapters"].append(chapter_index)
     checkpoint_store.save(checkpoint)
@@ -1603,9 +1927,12 @@ def stitch_part(
     logger: logging.Logger,
     cancellation: CancellationToken | None = None,
     ai_provider: str = "ComfyUI",
+    phase_callback: Callable[[str], None] | None = None,
 ) -> None:
     safe_book_title = safe_filename_component(metadata.title, fallback="Untitled")
-    part_filename = os.path.join(output_dir, f"{safe_book_title} - Part_{part_index:03d}.{output_format}")
+    part_filename = os.path.join(
+        output_dir, f"{safe_book_title} - Part_{part_index:03d}.{output_format}"
+    )
     part_master = master_dir / f"part_{part_index:03d}.flac"
     part_meta = {
         "title": f"{metadata.title} - Part {part_index}",
@@ -1641,6 +1968,8 @@ def stitch_part(
 
     if cancellation:
         cancellation.raise_if_cancelled()
+    if phase_callback:
+        phase_callback("Encoding part")
     encode_lossless_master(
         part_master,
         part_filename,
@@ -1652,6 +1981,8 @@ def stitch_part(
     )
     if cancellation:
         cancellation.raise_if_cancelled()
+    if phase_callback and config.provenance.enabled:
+        phase_callback("Signing")
     provenance = apply_c2pa_with_policy(
         artifact_path=part_filename,
         config=config.provenance,
@@ -1660,7 +1991,9 @@ def stitch_part(
     )
     if provenance:
         if provenance.final_sha256 != sha256_file(part_filename):
-            raise PipelineRuntimeError(f"C2PA final artifact hash mismatch for {part_filename}.")
+            raise PipelineRuntimeError(
+                f"C2PA final artifact hash mismatch for {part_filename}."
+            )
         refresh_ai_marking_manifest_hash(part_filename)
     part_record = _marked_artifact_record(
         part_filename,
@@ -1675,7 +2008,11 @@ def stitch_part(
             "source_sha256": provenance.source_sha256,
             "final_sha256": provenance.final_sha256,
         }
-        logger.info("Checkpointed C2PA manifest artifact=%s manifest_id=%s", part_filename, provenance.manifest_id)
+        logger.info(
+            "Checkpointed C2PA manifest artifact=%s manifest_id=%s",
+            part_filename,
+            provenance.manifest_id,
+        )
     checkpoint_store.save(checkpoint)
 
     remove_artifact_and_manifest(part_master)
@@ -1723,7 +2060,9 @@ def build_app_config(args: argparse.Namespace, project_root: Path) -> AppConfig:
 def runtime_project_root() -> Path:
     """Use the checkout root for source runs and the working directory for installed runs."""
     source_root = Path(__file__).resolve().parents[2]
-    if (source_root / "pyproject.toml").is_file() and (source_root / "resources").is_dir():
+    if (source_root / "pyproject.toml").is_file() and (
+        source_root / "resources"
+    ).is_dir():
         return source_root
     return Path.cwd()
 
@@ -1754,7 +2093,9 @@ def main(argv: list[str] | None = None) -> None:
             print(f"ERROR: [TTS_VOICE_DISCOVERY_ERROR] {exc}")
             raise SystemExit(2)
         if not voices:
-            print("No eligible non-cloning voices were returned by the selected provider.")
+            print(
+                "No eligible non-cloning voices were returned by the selected provider."
+            )
         for voice in voices:
             print(f"{voice.id}\t{voice.display_name}")
         return

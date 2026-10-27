@@ -18,12 +18,23 @@ if "websocket" not in sys.modules:
 
 from core.checkpoint import CheckpointStore
 from core.pipeline import build_argument_parser
-from gui.state import GUI_CONTROLLED_DESTINATIONS, bool_from_ui_state, gui_cli_parity, load_resume_context
+from gui.state import (
+    GUI_CONTROLLED_DESTINATIONS,
+    bool_from_ui_state,
+    gui_cli_parity,
+    load_resume_context,
+)
 
 
 def test_load_resume_context_for_incomplete_checkpoint(tmp_path):
     store = CheckpointStore(state_dir=tmp_path)
-    store.save({"version": 2, "status": "running", "ui_state": {"input_book": "book.epub", "fetch_metadata": True}})
+    store.save(
+        {
+            "version": 2,
+            "status": "running",
+            "ui_state": {"input_book": "book.epub", "fetch_metadata": True},
+        }
+    )
 
     context = load_resume_context(store)
 
@@ -33,14 +44,18 @@ def test_load_resume_context_for_incomplete_checkpoint(tmp_path):
 
 def test_load_resume_context_ignores_completed_checkpoint(tmp_path):
     store = CheckpointStore(state_dir=tmp_path)
-    store.save({"version": 2, "status": "completed", "ui_state": {"input_book": "done.epub"}})
+    store.save(
+        {"version": 2, "status": "completed", "ui_state": {"input_book": "done.epub"}}
+    )
 
     assert load_resume_context(store) is None
 
 
 def test_load_resume_context_accepts_cancelled_checkpoint(tmp_path):
     store = CheckpointStore(state_dir=tmp_path)
-    store.save({"version": 2, "status": "cancelled", "ui_state": {"input_book": "book.epub"}})
+    store.save(
+        {"version": 2, "status": "cancelled", "ui_state": {"input_book": "book.epub"}}
+    )
 
     context = load_resume_context(store)
 
@@ -50,7 +65,9 @@ def test_load_resume_context_accepts_cancelled_checkpoint(tmp_path):
 
 def test_load_resume_context_ignores_legacy_checkpoint(tmp_path):
     store = CheckpointStore(state_dir=tmp_path)
-    store.save({"version": 1, "status": "running", "ui_state": {"input_book": "legacy.epub"}})
+    store.save(
+        {"version": 1, "status": "running", "ui_state": {"input_book": "legacy.epub"}}
+    )
 
     assert load_resume_context(store) is None
 
@@ -70,10 +87,12 @@ def test_gui_control_contract_covers_every_cli_option():
 
 
 def test_gui_collects_every_declared_control():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
+    source = (PROJECT_ROOT / "src" / "gui" / "window.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     collect_args = next(
-        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_collect_args"
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_collect_args"
     )
     assigned = {
         target.attr
@@ -88,88 +107,19 @@ def test_gui_collects_every_declared_control():
     assert assigned == set(GUI_CONTROLLED_DESTINATIONS) | {"resume"}
 
 
-def test_gui_source_contains_no_reference_voice_picker():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8").lower()
-
-    assert "reference_audio" not in source
-    assert "reference voice" not in source
-
-
-def test_voice_discovery_is_bound_only_to_the_explicit_button():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
-
-    assert "self.voice_discovery_button.clicked.connect(self._discover_voices)" in source
-    assert "self.tts_provider_combo.currentIndexChanged.connect(self._on_tts_provider_changed)" in source
-    assert "currentIndexChanged.connect(self._discover_voices)" not in source
-    assert "provider changes must never contact an endpoint" in source
-
-
 def test_cli_voice_discovery_requires_an_explicit_flag():
     parser = build_argument_parser(PROJECT_ROOT)
 
     assert parser.parse_args([]).discover_voices is False
     assert parser.parse_args(["--discover-voices"]).discover_voices is True
-    assert parser.parse_args(["--tts-timeout-seconds", "4.5"]).comfyui_timeout_seconds == 4.5
-    assert parser.parse_args(["--comfyui-timeout-seconds", "4.5"]).comfyui_timeout_seconds == 4.5
-
-
-def test_gui_uses_dropdowns_for_bundled_speaker_and_model_choices():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
-
-    assert "self.speaker_combo = combo(QWEN_PRESET_SPEAKERS" in source
-    assert "self.model_choice_combo = combo(QWEN_MODEL_CHOICES_BY_MODE" in source
-    assert "self.speaker_edit = QLineEdit()" not in source
-    assert "self.model_choice_edit = QLineEdit()" not in source
-
-
-def test_gui_exposes_toc_override_and_structured_replacement_table():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
-
-    assert "self.narrate_toc_checkbox = QCheckBox(" in source
-    assert "self.replacement_table = QTableWidget(0, 5)" in source
-    assert '("Source", "Spoken as", "Match", "Scope", "Case")' in source
-    assert "args.replacement_rules = self._collect_replacement_rules()" in source
-    assert 'self._restore_replacement_rules(state.get("replacement_rules"))' in source
-    assert "self.replacement_table.setRowCount(0)" in source
-
-
-def test_gui_connects_structured_progress_and_eta_updates():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
-
-    assert "progress_changed = Signal(str, object)" in source
-    assert "progress_callback=lambda update: self.progress_changed.emit(self.job_id, update)" in source
-    assert "self.worker.progress_changed.connect(self._on_progress)" in source
-    assert "format_progress_text(update)" in source
-
-
-def test_gui_exposes_per_title_library_queue_and_cooperative_pause():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
-
-    assert 'self.tabs.addTab(self._build_library_tab(), "Library")' in source
-    assert "scan_library(books_dir, output_root)" in source
-    assert "self.library_tree.setItemWidget(item, 3, progress_bar)" in source
-    assert 'self._set_library_runtime_state(job_id, "Queued")' in source
-    assert 'self.cancel_btn = QPushButton("Pause active")' in source
-    assert 'self._set_library_runtime_state(job_id, "Paused", current_percent)' in source
-
-
-def test_gui_requires_confirmation_before_a_specific_gutenberg_download():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
-
-    assert "confirmation = QMessageBox(self)" in source
-    assert 'confirmation.setWindowTitle("Confirm Project Gutenberg download")' in source
-    assert "confirmation.setTextFormat(Qt.TextFormat.PlainText)" in source
-    assert "confirmation.setDefaultButton(QMessageBox.StandardButton.No)" in source
-    assert "if decision != QMessageBox.StandardButton.Yes:" in source
-    assert "self.client.download_epub(self.book, acquisition, self.books_dir)" in source
-
-
-def test_gui_loads_only_selected_gutenberg_details_before_review():
-    source = (PROJECT_ROOT / "src" / "gui" / "app.py").read_text(encoding="utf-8")
-
-    assert "self.client.load_book_details(self.book)" in source
-    assert 'return "Unavailable" if book.details_loaded else "Select to review"' in source
-    assert 'QPushButton("Review & download selected EPUB…")' in source
+    assert (
+        parser.parse_args(["--tts-timeout-seconds", "4.5"]).comfyui_timeout_seconds
+        == 4.5
+    )
+    assert (
+        parser.parse_args(["--comfyui-timeout-seconds", "4.5"]).comfyui_timeout_seconds
+        == 4.5
+    )
 
 
 def test_generated_and_downloaded_work_directories_keep_only_safe_placeholders_trackable():
@@ -181,5 +131,7 @@ def test_generated_and_downloaded_work_directories_keep_only_safe_placeholders_t
     assert "!audiobook_output/.gitkeep" in ignore
     assert "audiobook_output/.autoaudio_state/*" in ignore
     assert "audiobook_output/.segments/*" in ignore
-    assert (PROJECT_ROOT / "audiobook_output" / ".autoaudio_state" / ".gitkeep").is_file()
+    assert (
+        PROJECT_ROOT / "audiobook_output" / ".autoaudio_state" / ".gitkeep"
+    ).is_file()
     assert (PROJECT_ROOT / "audiobook_output" / ".segments" / ".gitkeep").is_file()

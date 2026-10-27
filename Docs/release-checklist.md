@@ -1,45 +1,40 @@
-# AutoAudio v2 release qualification
+# Release checklist
 
-This document tracks evidence required before `release/v2.0.0` can merge into `main` and receive the `v2.0.0` tag.
+Use this checklist against the exact candidate commit. Keep dated pass/fail tables, plans, benchmark logs,
+and review reports in gitignored `local_notes/reports/` or `local_notes/reviews/`. Promote lasting usage,
+configuration, and known-limit findings into the maintained guides before release.
 
-## Automated gates
+## Automated checks
 
-| Gate | Status | Evidence |
-|---|---|---|
-| Unit and spoof/integration suite | Passed | 137 tests after packaging, installed-resource, and documentation-link coverage |
-| Import and compile checks | Passed | Python 3.12 release workspace |
-| Workflow fixtures | Passed | CustomVoice and VoiceDesign adapters covered |
-| Synthetic EPUB fixtures | Passed | pubparser adapter tests |
-| Real Project Gutenberg EPUB | Passed | pubparser v0.1.1 parsed book 84 with metadata, cover, and normalization |
-| Stitched cover art | Passed | Real FFmpeg encodes retain chapter metadata, AI marking, and attached JPEG artwork in FLAC, MP3, and M4B |
-| C2PA container compatibility | Passed | Live `c2patool 0.27.16` ES256 signing and parse-back succeeded for FLAC, MP3, and M4B; cover art and AI-marking audit remained valid |
-| Source-package and wheel smoke | Passed on packaging candidate | Built sdist, rebuilt wheel from the sdist, and installed AutoAudio plus pinned pubparser into a fresh no-index virtual environment; both commands and packaged resources passed |
-| Clean-environment dependency install | Pending | Package-only smoke passed; resolve and install the full platform dependency set after final versions are selected |
-| Exact dependency inventory | Pending | Capture the final tested platform resolution |
+- Run the unit and spoof/integration suite in the project's virtual environment.
+- Compile/import the source and check dependency consistency with `python -m pip check`.
+- Exercise both Qwen workflow fixtures and the declared Python/platform combinations.
+- Run synthetic EPUB fixtures and actual Qt worker, draft, queue, pause, and shutdown tests.
+- Build source/wheel packages and smoke-test the installed commands and bundled resources outside the checkout.
+- Check local documentation links and verify generated books, audio, credentials, and local notes are untracked.
 
-## Manual runtime gates
+## Runtime qualification
 
-| Gate | Status | Evidence |
-|---|---|---|
-| Real preset generation | Passed | Maintainer manual test |
-| Real VoiceDesign generation | Passed | Maintainer manual test |
-| Chapter stitching | Passed | Maintainer manual test |
-| Stitched-part cover art | Passed | Maintainer re-stitched a part after the FFmpeg option-order fix and confirmed its cover |
-| FLAC output | Passed | Maintainer manual test |
-| MP3 output | Passed | Maintainer manual test |
-| M4B output | Passed | Maintainer manual test |
-| Interruption and resume | Passed | Maintainer manual test |
-| Disclosure placement | Passed | Maintainer manual test |
-| AudioSeal embedding/detection | Retest planned | Maintainer confirmed embedding/detection on the previous candidate; repeat after the new automatic device policy |
-| Complete-book run | Passed | Maintainer completed the full processing and verification flow |
-| C2PA signing and verification | Retest planned | Live and maintainer tests passed on the previous candidate; repeat provenance verification on the final candidate |
+- Record the tested Python, direct/transitive dependencies, Torch CPU/CUDA/ROCm build, external provider/node
+  versions when available, and system tools. Keep ComfyUI installation and container pins outside this repo.
+- Generate a short representative excerpt with each supported narrator mode being qualified. Verify a single
+  audible disclosure per chapter, narration quality, spacing, chapter/part assembly, and metadata/cover art.
+- Verify FLAC, MP3, and M4B exports and exercise interruption/resume at segment and chapter boundaries.
+- Measure cold and warm AudioSeal CPU calls with representative speech. Check thread/backend tuning and
+  serialized identifying-message verification; qualify GPU behavior separately on suitable hardware.
+- Run `autoaudio-verify --output-dir <test-output>` and distinguish artifact/hash evidence from direct
+  signal-level watermark checks. See [Resume, watermarking, and provenance](provenance-and-resume.md).
+- Exercise C2PA signing, parse-back validation, and both soft-fail/hard-fail policies on supported formats.
+- Check startup and provider selection do not issue requests. Test samples/discovery through their explicit
+  actions and ensure ComfyUI pause cannot interrupt unrelated server work.
+
+Use isolated output paths and bounded excerpts for routine qualification. A whole-book test requires
+explicit authorization. Record incomplete gates and platform limits accurately; an old report does not
+establish that a new candidate passed them.
 
 ## Release actions
 
-- Run `autoaudio-verify --output-dir <completed-book-output>`.
-- Exercise C2PA in both soft-fail and hard-fail modes.
-- Confirm final dependency versions and notices.
-- Run tests and packaged smoke checks from the exact final commit.
-- Review the final diff against `main` for prohibited reference-audio or cloning paths.
-- Merge `release/v2.0.0` into `main` only after all required gates pass.
-- Tag the merged commit `v2.0.0` and publish release notes describing the intentional v1 incompatibility.
+- Confirm final dependency requirements, tested resolution, licenses, and notices.
+- Review the final diff for prohibited reference-audio or cloning paths and changes to resume compatibility.
+- Prepare release notes for behavior changes and any intentional checkpoint or v1 compatibility breaks.
+- Merge the reviewed candidate after required gates pass. Push, tag, and publish when authorized by the maintainer.

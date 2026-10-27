@@ -39,7 +39,7 @@ class MetadataExtractionError(AutoAudioError):
 class ResumeStateError(AutoAudioError):
     guidance = ErrorGuidance(
         code="RESUME_STATE_ERROR",
-        remediation="Run with --resume no, or clear .autoaudio_state in the selected output directory.",
+        remediation="Resume with the original input/settings, or choose a new output directory; preserve existing recovery files.",
         exit_code=4,
     )
 
@@ -102,5 +102,5 @@ class PipelineCancelled(AutoAudioError):
 
 def format_user_error(exc: BaseException) -> str:
     if isinstance(exc, AutoAudioError):
-        return f"[{exc.guidance.code}] {exc}\\nRemediation: {exc.remediation}"
-    return f"[UNEXPECTED_ERROR] {exc}\\nRemediation: Review traceback in the run log."
+        return f"[{exc.guidance.code}] {exc}\nRemediation: {exc.remediation}"
+    return f"[UNEXPECTED_ERROR] {exc}\nRemediation: Review traceback in the run log."

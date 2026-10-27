@@ -13,7 +13,9 @@ def configure_run_logger(output_dir: str | Path) -> tuple[logging.Logger, Path]:
     logger.setLevel(logging.INFO)
 
     # Reconfigure handlers each run to avoid duplicate lines across test runs.
-    logger.handlers.clear()
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
 
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     file_handler = logging.FileHandler(log_path, encoding="utf-8")

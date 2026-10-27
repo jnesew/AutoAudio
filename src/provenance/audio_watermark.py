@@ -4,15 +4,41 @@ import hashlib
 import hmac
 import io
 import logging
+import math
 import os
 import subprocess
+import threading
+import time
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 
 
 _AUDIOSEAL_JIT_WARNING = r"`torch\.jit\.script` is not supported in Python 3\.14\+"
 _AUDIOSEAL_WEIGHT_NORM_WARNING = r"`torch\.nn\.utils\.weight_norm` is deprecated"
+_AUDIOSEAL_INFERENCE_LOCK = threading.RLock()
+
+
+@dataclass
+class _RuntimeState:
+    cpu_after_cuda_failure: bool = False
+
+
+_RUNTIME_STATE: ContextVar[_RuntimeState | None] = ContextVar(
+    "autoaudio_audioseal_runtime", default=None
+)
+
+
+@contextmanager
+def audioseal_runtime_session():
+    """Remember automatic device failure within one job, retry on the next job."""
+    token = _RUNTIME_STATE.set(_RuntimeState())
+    try:
+        yield
+    finally:
+        _RUNTIME_STATE.reset(token)
 
 
 class AudioSealCompatibilityError(RuntimeError):
@@ -23,7 +49,11 @@ def _derive_16bit_message(secret_key: str, content_id: str, source_sha256: str):
     import numpy as np
     import torch
 
-    mac = hmac.new(secret_key.encode("utf-8"), f"{content_id}|{source_sha256}".encode("utf-8"), hashlib.sha256).digest()
+    mac = hmac.new(
+        secret_key.encode("utf-8"),
+        f"{content_id}|{source_sha256}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
     bits = np.unpackbits(np.frombuffer(mac[:2], dtype=np.uint8)).astype(np.int64)
     return torch.from_numpy(bits).unsqueeze(0)
 
@@ -69,7 +99,9 @@ def resolve_audioseal_device(requested: str) -> str:
     if normalized == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     if normalized == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("AudioSeal device 'cuda' was requested, but PyTorch reports no CUDA/ROCm device.")
+        raise RuntimeError(
+            "AudioSeal device 'cuda' was requested, but PyTorch reports no CUDA/ROCm device."
+        )
     return normalized
 
 
@@ -93,12 +125,79 @@ def _as_float(x) -> float:
     return float(x)
 
 
+@contextmanager
+def _audioseal_inference_context(device: str):
+    # The pinned AudioSeal 0.2 SEANet forwards compile lazily by default. Book
+    # segments have different lengths, so compilation/recompilation can cost
+    # much more than inference. Use its own eager-mode context without changing
+    # process-wide compiler configuration or environment variables. AudioSeal's context
+    # uses a module-global flag, so keep concurrent AutoAudio calls serialized.
+    from audioseal.libs.moshi.utils.compile import no_compile
+    import torch
+
+    with _AUDIOSEAL_INFERENCE_LOCK:
+        previous_threads = None
+        if device == "cpu":
+            previous_threads = torch.get_num_threads()
+            configured = os.environ.get("AUTOAUDIO_WATERMARK_CPU_THREADS", "").strip()
+            try:
+                threads = int(configured) if configured else min(previous_threads, 4)
+            except ValueError as exc:
+                raise ValueError(
+                    "AUTOAUDIO_WATERMARK_CPU_THREADS must be a positive integer."
+                ) from exc
+            if threads < 1:
+                raise ValueError(
+                    "AUTOAUDIO_WATERMARK_CPU_THREADS must be a positive integer."
+                )
+            # Large intra-op pools can make first-use CPU convolutions much
+            # slower for new speech lengths. Keep a small default pool, respect
+            # an already smaller pool, and allow measured machine-specific tuning.
+            if threads != previous_threads:
+                torch.set_num_threads(threads)
+        try:
+            with no_compile():
+                yield
+        finally:
+            if (
+                previous_threads is not None
+                and torch.get_num_threads() != previous_threads
+            ):
+                torch.set_num_threads(previous_threads)
+
+
 @dataclass(frozen=True)
 class WatermarkResult:
     applied: bool
     verified: bool
     method: str
     detail: str
+
+
+@contextmanager
+def _audioseal_detector_context(device: str):
+    """Avoid expensive cold oneDNN transposed-convolution kernels on CPU.
+
+    oneDNN transposed-convolution startup can be expensive for new audio lengths.
+    Limit native kernels to detection under the existing inference lock and
+    restore the caller's backend state. An opt-in retains oneDNN when benchmarking
+    favors it. Serialized-audio/message checks remain unchanged.
+    """
+    if (
+        device == "cpu"
+        and os.environ.get("AUTOAUDIO_WATERMARK_CPU_MKLDNN", "0").strip() != "1"
+    ):
+        import torch
+
+        backend = torch.backends.mkldnn
+        previous = backend.enabled
+        backend.enabled = False
+        try:
+            yield
+        finally:
+            backend.enabled = previous
+    else:
+        yield
 
 
 def watermark_audio_bytes(
@@ -111,7 +210,6 @@ def watermark_audio_bytes(
     verify_threshold: float = 0.5,
 ) -> bytes:
     """Embed an AudioSeal watermark into an audio byte stream (24 kHz mono processing)."""
-    import librosa
     import soundfile as sf
     import torch
 
@@ -120,37 +218,67 @@ def watermark_audio_bytes(
     generator, detector = _load_audioseal_models(device)
 
     decode_proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "24000", "-f", "wav", "pipe:1"],
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "-f",
+            "wav",
+            "pipe:1",
+        ],
         input=audio_data,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        check=True
+        check=True,
     )
     decoded_wav_bytes = decode_proc.stdout
 
-    wav_np, sr = librosa.load(io.BytesIO(decoded_wav_bytes), sr=24000, mono=True)
+    # ffmpeg already normalized the stream. SoundFile avoids librosa's lazy
+    # import/JIT startup cost and reads the same serialized PCM for verification.
+    wav_np, sr = sf.read(io.BytesIO(decoded_wav_bytes), dtype="float32")
     wav = torch.from_numpy(wav_np).float().unsqueeze(0).unsqueeze(0).to(device)
 
-    with torch.no_grad():
+    with _audioseal_inference_context(device), torch.no_grad():
         watermark = _watermark_with_message(generator, wav, msg)
         watermarked = torch.clamp(wav + watermark, -1.0, 1.0)
 
-    out_io = io.BytesIO()
-    sf.write(out_io, watermarked.squeeze(0).squeeze(0).detach().cpu().numpy(), sr, format="WAV")
-    watermarked_wav_bytes = out_io.getvalue()
+        out_io = io.BytesIO()
+        sf.write(
+            out_io,
+            watermarked.squeeze(0).squeeze(0).detach().cpu().numpy(),
+            sr,
+            format="WAV",
+        )
+        watermarked_wav_bytes = out_io.getvalue()
 
-    if verify:
-        verify_np, _ = librosa.load(io.BytesIO(watermarked_wav_bytes), sr=24000, mono=True)
-        verify_tensor = torch.from_numpy(verify_np).float().unsqueeze(0).unsqueeze(0).to(device)
-        with torch.no_grad():
-            prob, detected_msg = detector.detect_watermark(verify_tensor)
+        if verify:
+            verify_np, _ = sf.read(io.BytesIO(watermarked_wav_bytes), dtype="float32")
+            verify_tensor = (
+                torch.from_numpy(verify_np).float().unsqueeze(0).unsqueeze(0).to(device)
+            )
+            with _audioseal_detector_context(device):
+                prob, detected_msg = detector.detect_watermark(verify_tensor)
 
-        if _as_float(prob) < verify_threshold:
-            raise RuntimeError("AudioSeal verification failed: detector confidence below threshold.")
-        if torch.is_tensor(detected_msg):
+            confidence = _as_float(prob)
+            if not math.isfinite(confidence) or confidence < verify_threshold:
+                raise RuntimeError(
+                    "AudioSeal verification failed: detector confidence below threshold or non-finite."
+                )
+            if not torch.is_tensor(detected_msg) or detected_msg.shape != msg.shape:
+                raise RuntimeError(
+                    "AudioSeal verification failed: detector returned an invalid message shape."
+                )
             expected = msg.to(detected_msg.device)
-            if detected_msg.shape == expected.shape and not torch.equal((detected_msg > 0.5).to(expected.dtype), expected):
-                raise RuntimeError("AudioSeal verification failed: embedded message did not round-trip.")
+            if not torch.equal((detected_msg > 0.5).to(expected.dtype), expected):
+                raise RuntimeError(
+                    "AudioSeal verification failed: embedded message did not round-trip."
+                )
 
     return watermarked_wav_bytes
 
@@ -164,12 +292,29 @@ def watermark_audio_bytes_best_effort(
 ) -> tuple[WatermarkResult, bytes]:
     """Return watermark evidence and bytes; strict callers reject a failed result."""
     log = logger or logging.getLogger("autoaudio.run")
-    secret_key = os.environ.get("AUTOAUDIO_WATERMARK_SECRET", "default_public_autoaudio_key_123").strip()
-    requested_device = os.environ.get("AUTOAUDIO_WATERMARK_DEVICE", device).strip().lower()
+    secret_key = os.environ.get(
+        "AUTOAUDIO_WATERMARK_SECRET", "default_public_autoaudio_key_123"
+    ).strip()
+    requested_device = (
+        os.environ.get("AUTOAUDIO_WATERMARK_DEVICE", device).strip().lower()
+    )
     resolved_device: str | None = None
+    runtime = _RUNTIME_STATE.get()
+    previous_fallback = (
+        requested_device == "auto"
+        and runtime is not None
+        and runtime.cpu_after_cuda_failure
+    )
+    started = time.perf_counter()
     try:
-        resolved_device = resolve_audioseal_device(requested_device)
-        log.info("AudioSeal device requested=%s resolved=%s", requested_device, resolved_device)
+        resolved_device = (
+            "cpu" if previous_fallback else resolve_audioseal_device(requested_device)
+        )
+        log.info(
+            "AudioSeal device requested=%s resolved=%s",
+            requested_device,
+            resolved_device,
+        )
         out_bytes = watermark_audio_bytes(
             audio_data,
             content_id=content_id,
@@ -178,13 +323,29 @@ def watermark_audio_bytes_best_effort(
             verify=True,
             verify_threshold=0.5,
         )
-        detail = f"verified; requested={requested_device}; device={resolved_device}"
-        return WatermarkResult(applied=True, verified=True, method="audioseal", detail=detail), out_bytes
+        detail = (
+            "verified; requested=auto; device=cpu; fallback_from=cuda"
+            if previous_fallback
+            else f"verified; requested={requested_device}; device={resolved_device}"
+        )
+        log.info(
+            "AudioSeal verified %s on %s in %.3fs",
+            content_id,
+            resolved_device,
+            time.perf_counter() - started,
+        )
+        return WatermarkResult(
+            applied=True, verified=True, method="audioseal", detail=detail
+        ), out_bytes
     except AudioSealCompatibilityError as exc:
         log.warning("Audio watermarking skipped for %s (%s)", content_id, exc)
-        return WatermarkResult(applied=False, verified=False, method="audioseal", detail=str(exc)), audio_data
+        return WatermarkResult(
+            applied=False, verified=False, method="audioseal", detail=str(exc)
+        ), audio_data
     except Exception as exc:
         if requested_device == "auto" and resolved_device == "cuda":
+            if runtime is not None:
+                runtime.cpu_after_cuda_failure = True
             log.warning(
                 "AudioSeal automatic CUDA/ROCm execution failed for %s (%s); retrying on CPU",
                 content_id,
@@ -207,11 +368,24 @@ def watermark_audio_bytes_best_effort(
                     verify_threshold=0.5,
                 )
                 detail = "verified; requested=auto; device=cpu; fallback_from=cuda"
-                return WatermarkResult(applied=True, verified=True, method="audioseal", detail=detail), out_bytes
+                log.info(
+                    "AudioSeal verified %s on CPU after fallback in %.3fs",
+                    content_id,
+                    time.perf_counter() - started,
+                )
+                return WatermarkResult(
+                    applied=True, verified=True, method="audioseal", detail=detail
+                ), out_bytes
             except Exception as cpu_exc:
                 detail = f"automatic CUDA/ROCm attempt failed ({exc}); CPU retry failed ({cpu_exc})"
-                log.warning("Audio watermarking skipped for %s (%s)", content_id, detail)
-                return WatermarkResult(applied=False, verified=False, method="audioseal", detail=detail), audio_data
+                log.warning(
+                    "Audio watermarking skipped for %s (%s)", content_id, detail
+                )
+                return WatermarkResult(
+                    applied=False, verified=False, method="audioseal", detail=detail
+                ), audio_data
 
         log.warning("Audio watermarking skipped for %s (%s)", content_id, exc)
-        return WatermarkResult(applied=False, verified=False, method="audioseal", detail=str(exc)), audio_data
+        return WatermarkResult(
+            applied=False, verified=False, method="audioseal", detail=str(exc)
+        ), audio_data

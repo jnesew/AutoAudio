@@ -6,7 +6,9 @@ from typing import Any
 from core.checkpoint import CheckpointError, CheckpointStore
 
 
-GUI_CLI_EXCLUDED_DESTINATIONS = frozenset({"help", "gui", "resume", "version", "discover_voices"})
+GUI_CLI_EXCLUDED_DESTINATIONS = frozenset(
+    {"help", "gui", "resume", "version", "discover_voices"}
+)
 GUI_CONTROLLED_DESTINATIONS = frozenset(
     {
         "input_book",
@@ -19,6 +21,8 @@ GUI_CONTROLLED_DESTINATIONS = frozenset(
         "target_words_per_segment",
         "max_words_per_segment",
         "narrate_toc",
+        "excluded_chapters",
+        "chapter_text_overrides",
         "replacement_file",
         "replacement_rules",
         "disclosure_gap_ms",

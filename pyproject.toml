@@ -29,7 +29,6 @@ dependencies = [
   "PySide6>=6.7",
   "numpy",
   "torch",
-  "librosa",
   "soundfile",
   "audioseal==0.2.0",
 ]

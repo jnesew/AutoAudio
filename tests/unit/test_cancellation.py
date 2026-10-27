@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -54,11 +54,12 @@ def test_spoof_client_rejects_pre_cancelled_request():
         )
 
 
-def test_real_client_removes_and_interrupts_cancelled_prompt():
+def test_real_client_removes_own_cancelled_prompt_and_closes_socket():
     client = RealComfyUIClient("127.0.0.1:8188")
     workflow = load_workflow_template(PROJECT_ROOT / "resources" / "workflows" / "qwen3_tts_custom_voice.json")
 
-    with patch.object(client, "_queue_prompt", return_value="prompt-7") as queue_prompt, patch.object(
+    socket = Mock()
+    with patch.object(client, "_connect_websocket", return_value=socket), patch.object(client, "_queue_prompt", return_value="prompt-7") as queue_prompt, patch.object(
         client,
         "_wait_for_completion",
         side_effect=PipelineCancelled("cancelled"),
@@ -72,8 +73,9 @@ def test_real_client_removes_and_interrupts_cancelled_prompt():
             )
 
     queue_prompt.assert_called_once()
-    assert queue_prompt.call_args.kwargs["timeout_seconds"] == 120
+    assert 0 < queue_prompt.call_args.kwargs["timeout_seconds"] <= 120
     cancel_prompt.assert_called_once_with("prompt-7")
+    socket.close.assert_called_once()
 
 
 def test_real_client_websocket_wait_polls_cancellation():

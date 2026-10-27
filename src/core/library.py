@@ -87,7 +87,9 @@ def checkpoint_progress_percent(checkpoint: dict, state_dir: str | Path) -> int:
                 continue
             try:
                 completed.add(ProgressTracker.part_key(int(part_index)))
-                completed_part_chapters.update(int(value) for value in record.get("chapter_indexes", []))
+                completed_part_chapters.update(
+                    int(value) for value in record.get("chapter_indexes", [])
+                )
             except (AttributeError, TypeError, ValueError):
                 continue
 
@@ -106,7 +108,9 @@ def checkpoint_progress_percent(checkpoint: dict, state_dir: str | Path) -> int:
         chapter_key = str(chapter.index)
         chapter_valid = _artifact_present(chapter_artifacts.get(chapter_key))
         master_valid = _artifact_present(chapter_masters.get(chapter_key))
-        reusable_chapter = master_valid or (chapter.index in completed_part_chapters and chapter_valid)
+        reusable_chapter = master_valid or (
+            chapter.index in completed_part_chapters and chapter_valid
+        )
         if reusable_chapter:
             completed.update(
                 ProgressTracker.segment_key(chapter.index, segment.index)
@@ -115,7 +119,9 @@ def checkpoint_progress_percent(checkpoint: dict, state_dir: str | Path) -> int:
         else:
             for segment in chapter.segments:
                 if _artifact_present(segment_artifacts.get(segment.id)):
-                    completed.add(ProgressTracker.segment_key(chapter.index, segment.index))
+                    completed.add(
+                        ProgressTracker.segment_key(chapter.index, segment.index)
+                    )
         if chapter_valid and reusable_chapter:
             completed.add(ProgressTracker.chapter_key(chapter.index))
 
@@ -135,7 +141,9 @@ def checkpoint_progress_percent(checkpoint: dict, state_dir: str | Path) -> int:
     return min(99, int(tracker.completed_units * 100 / max(1, tracker.total_units)))
 
 
-def _job_summary(output_dir: Path, book_id: str) -> tuple[str, int, bool, str | None, str | None]:
+def _job_summary(
+    output_dir: Path, book_id: str
+) -> tuple[str, int, bool, str | None, str | None]:
     state_dir = AppConfig.state_dir_for(output_dir)
     store = CheckpointStore(state_dir)
     try:
@@ -167,7 +175,13 @@ def _job_summary(output_dir: Path, book_id: str) -> tuple[str, int, bool, str | 
         "completed": "Complete",
     }.get(raw_status, "Unknown")
     percent = checkpoint_progress_percent(checkpoint, state_dir)
-    return status, percent, raw_status in RESUMABLE_CHECKPOINT_STATUSES, raw_status, None
+    return (
+        status,
+        percent,
+        raw_status in RESUMABLE_CHECKPOINT_STATUSES,
+        raw_status,
+        None,
+    )
 
 
 def _legacy_output_for(output_root: Path, book_id: str) -> Path | None:
@@ -185,7 +199,9 @@ def _legacy_output_for(output_root: Path, book_id: str) -> Path | None:
     return output_root
 
 
-def scan_library(books_dir: str | Path, output_root: str | Path) -> tuple[LibraryBook, ...]:
+def scan_library(
+    books_dir: str | Path, output_root: str | Path, *, cache: dict | None = None
+) -> tuple[LibraryBook, ...]:
     """Scan supported local sources without following directory symlinks."""
     books_root = Path(books_dir).resolve()
     resolved_output_root = Path(output_root).resolve()
@@ -206,17 +222,32 @@ def scan_library(books_dir: str | Path, output_root: str | Path) -> tuple[Librar
     )
     for source_path in paths:
         try:
-            book_id = sha256_file(source_path)
+            stat = source_path.stat()
+            identity = (
+                str(source_path),
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
+                stat.st_ino,
+                stat.st_dev,
+            )
+            cached = cache.get(identity) if cache is not None else None
+            if cached is None:
+                cached = (sha256_file(source_path), _metadata_for(source_path))
+                if cache is not None:
+                    cache[identity] = cached
+            book_id, metadata = cached
         except OSError:
             continue
         if book_id in seen_book_ids:
             continue
         seen_book_ids.add(book_id)
-        metadata = _metadata_for(source_path)
-        output_dir = _legacy_output_for(resolved_output_root, book_id) or job_output_dir(
+        output_dir = _legacy_output_for(
             resolved_output_root, book_id
+        ) or job_output_dir(resolved_output_root, book_id)
+        status, percent, resumable, checkpoint_status, state_error = _job_summary(
+            output_dir, book_id
         )
-        status, percent, resumable, checkpoint_status, state_error = _job_summary(output_dir, book_id)
         entries.append(
             LibraryBook(
                 id=book_id,

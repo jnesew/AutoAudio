@@ -11,6 +11,8 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+# Working plans, reviews, investigations, and dated validation reports.
+/local_notes/
 # Generated or downloaded works must never be staged by a broad `git add`.
 books/*
 !books/.gitkeep
