@@ -144,3 +144,23 @@ Metadata precedence is user override, embedded source metadata, fetched metadata
 - `--provenance-failure-mode {soft-fail,hard-fail}`
 
 Private-key passwords are used for the current process only and are not written to checkpoints.
+
+## Artifact verification (`autoaudio-verify`)
+
+These options belong to the separate verification command:
+
+| Option | Effect |
+| --- | --- |
+| `--output-dir <path>` | Audit published chapter and part files in a job directory. |
+| `--file <path>` | Inspect one file; use either this or `--output-dir`. |
+| `--include-segments` | Include cached `.segments` audio in a directory audit. |
+| `--check-signal` | Decode and detect every recorded AudioSeal span. Can load/download models. |
+| `--require-exact-payload` | Require zero wrong bits; implies a signal check. Otherwise up to two wrong bits require presence score ≥0.9. |
+| `--check-signature` | Validate the embedded C2PA signature and its binding to the file. Requires `c2patool`. |
+| `--require-trusted-signature` | Require both a valid signature and a signer trusted by the selected anchors; implies a signature check. |
+| `--trust-anchors <path>` | Local PEM trust anchors; implies a signature check without changing the system trust store. |
+| `--provenance-tool <path-or-name>` | C2PA inspection executable; defaults to `c2patool`. |
+| `--watermark-device {cpu,cuda,auto}` | Signal verification device; defaults to `cpu`. |
+| `--json` | Emit separate integrity, detection, payload, coverage, signature, and trust results. |
+
+Exit codes are `0` when all requested checks pass, `1` on a verification failure, and `2` for invalid input or no matching audio. The default audit checks recorded evidence and metadata without running AudioSeal. A signal check requires a payload timeline from a sidecar or valid embedded C2PA assertion. See [verification scope and limitations](provenance-and-resume.md#audioseal-marking).

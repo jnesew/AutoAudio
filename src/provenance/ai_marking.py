@@ -9,9 +9,14 @@ from pathlib import Path
 from typing import Iterable
 
 from core.checkpoint import sha256_file
+from provenance.payloads import validate_payloads
 
 
-AI_MARKING_SCHEMA = "autoaudio.ai_marking.v2"
+AI_MARKING_SCHEMA = "autoaudio.ai_marking.v3"
+# The additive evidence format does not change the frozen speech plan. Keep its
+# compatibility identity stable while accepting earlier, exact-only evidence.
+AI_MARKING_COMPATIBILITY_SCHEMA = "autoaudio.ai_marking.v2"
+SUPPORTED_MARKING_SCHEMAS = {AI_MARKING_SCHEMA, AI_MARKING_COMPATIBILITY_SCHEMA}
 AI_MARKING_COMMENT = (
     "AutoAudio AI marking: ai_generated=true; ai_system=AutoAudio; "
     "ai_marking=audio_watermark+metadata+manifest"
@@ -28,6 +33,8 @@ class WatermarkEvidence:
     sha256: str
     scope: str
     sources: tuple["WatermarkEvidence", ...] = ()
+    payloads: tuple[dict, ...] = ()
+    payloads_complete: bool = False
 
 
 def ai_marking_metadata_args(*, provider: str = "ComfyUI") -> list[str]:
@@ -79,6 +86,8 @@ def write_ai_marking_manifest(
     provider: str = "ComfyUI",
     watermark_scope: str = "direct",
     source_artifacts: Iterable[WatermarkEvidence] = (),
+    payloads: Iterable[dict] = (),
+    payloads_complete: bool = False,
 ) -> Path:
     artifact = Path(artifact_path)
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -111,6 +120,10 @@ def write_ai_marking_manifest(
         "generated_at_utc": generated_at,
         "artifact_hash_updated_at_utc": generated_at,
     }
+    records = validate_payloads(tuple(payloads))
+    if records:
+        payload["watermark_payloads"] = list(records)
+        payload["watermark_payloads_complete"] = payloads_complete
     manifest_path = manifest_path_for(artifact)
     _write_manifest_payload(manifest_path, payload)
     return manifest_path
@@ -123,7 +136,7 @@ def refresh_ai_marking_manifest_hash(artifact_path: str | Path) -> Path:
         raise ValueError(f"Cannot refresh watermark manifest for missing artifact: {artifact}")
     manifest_path = manifest_path_for(artifact)
     payload = load_ai_marking_manifest(manifest_path)
-    if payload.get("schema") != AI_MARKING_SCHEMA or payload.get("artifact") != artifact.name:
+    if payload.get("schema") not in SUPPORTED_MARKING_SCHEMAS or payload.get("artifact") != artifact.name:
         raise ValueError(f"Cannot refresh incompatible watermark manifest: {manifest_path}")
 
     payload["artifact_sha256"] = sha256_file(artifact)
@@ -150,6 +163,10 @@ def load_ai_marking_manifest(manifest_path: str | Path) -> dict:
     for field in ("applied", "verified"):
         if not isinstance(watermark.get(field), bool):
             raise ValueError(f"Manifest audio_watermark.{field} must be a boolean.")
+    if "watermark_payloads" in payload:
+        validate_payloads(payload["watermark_payloads"])
+        if type(payload.get("watermark_payloads_complete")) is not bool:
+            raise ValueError("Manifest watermark_payloads_complete must be a boolean.")
     return payload
 
 
@@ -164,7 +181,7 @@ def validate_watermarked_artifact(artifact_path: str | Path) -> WatermarkEvidenc
 
     payload = load_ai_marking_manifest(manifest_path)
 
-    if payload.get("schema") != AI_MARKING_SCHEMA:
+    if payload.get("schema") not in SUPPORTED_MARKING_SCHEMAS:
         raise ValueError(f"Unsupported watermark manifest schema: {payload.get('schema')!r}")
     if payload.get("artifact") != artifact.name:
         raise ValueError(f"Watermark manifest artifact name does not match {artifact}")
@@ -203,6 +220,8 @@ def validate_watermarked_artifact(artifact_path: str | Path) -> WatermarkEvidenc
         sha256=actual_sha256,
         scope=str(watermark.get("scope") or "direct"),
         sources=tuple(sources),
+        payloads=validate_payloads(payload.get("watermark_payloads", [])),
+        payloads_complete=payload.get("watermark_payloads_complete", False),
     )
 
 

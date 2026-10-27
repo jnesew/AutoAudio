@@ -17,6 +17,7 @@ from provenance.ai_marking import (
     validate_watermarked_artifact,
     write_ai_marking_manifest,
 )
+from provenance.payloads import offset_payloads, validate_payloads
 
 
 AUDIO_ASSEMBLY_POLICY_VERSION = "lossless-flac-masters-v1"
@@ -136,6 +137,32 @@ def _run_ffmpeg(command: list[str]) -> None:
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _assembled_payloads(audio_files, sources):
+    if not any(source.payloads for source in sources):
+        return (), False
+    import soundfile as sf
+
+    by_path = {Path(source.path).resolve(): source for source in sources}
+    records = []
+    cursor = 0
+    used = set()
+    for path in audio_files:
+        info = sf.info(str(path))
+        if info.samplerate != ASSEMBLY_SAMPLE_RATE or info.channels != ASSEMBLY_CHANNELS:
+            raise AudioStitchError("Payload timelines require normalized 24 kHz mono assembly inputs.")
+        source = by_path.get(Path(path).resolve())
+        if source:
+            used.add(Path(path).resolve())
+            if any(record["start_sample"] + record["sample_count"] > info.frames for record in source.payloads):
+                raise AudioStitchError("Watermark payload span exceeds its source audio.")
+            records.extend(offset_payloads(source.payloads, cursor))
+        cursor += info.frames
+    if used != set(by_path):
+        raise AudioStitchError("Watermark evidence names an artifact absent from the assembly inputs.")
+    complete = all(source.payloads and source.payloads_complete for source in sources)
+    return validate_payloads(records), complete
+
+
 def assemble_lossless_master(
     audio_files: Sequence[str],
     output_path: str | Path,
@@ -162,6 +189,7 @@ def assemble_lossless_master(
         for source in validated_sources
         for leaf in (source.sources if source.sources else (source,))
     )
+    payloads, payloads_complete = _assembled_payloads(audio_files, validated_sources)
 
     output = Path(output_path)
     if output.suffix.lower() != ".flac":
@@ -204,6 +232,8 @@ def assemble_lossless_master(
             watermark_detail="All marked source artifacts were hash-checked and verified before lossless assembly.",
             source_artifacts=evidence,
             provider=ai_provider,
+            payloads=payloads,
+            payloads_complete=payloads_complete,
         )
         return str(output)
     except Exception as exc:
@@ -379,9 +409,11 @@ def encode_lossless_master(
             watermark_applied=True,
             watermark_verified=True,
             watermark_scope="source-artifacts",
-            watermark_detail="Verified source watermarks were preserved through final container encoding.",
+            watermark_detail="Inherited verified source evidence; the final encoded waveform has not been rechecked.",
             source_artifacts=evidence.sources if evidence.sources else (evidence,),
             provider=ai_provider,
+            payloads=evidence.payloads,
+            payloads_complete=evidence.payloads_complete,
         )
         return output
     except Exception as exc:

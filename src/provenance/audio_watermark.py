@@ -15,6 +15,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 
+from provenance.payloads import (
+    PAYLOAD_SCHEMA, PAYLOAD_DERIVATION, attribution_id,
+    MAX_PAYLOAD_BIT_ERRORS, PARTIAL_PAYLOAD_MIN_PRESENCE,
+    partial_payload_accepted,
+)
+
 
 _AUDIOSEAL_JIT_WARNING = r"`torch\.jit\.script` is not supported in Python 3\.14\+"
 _AUDIOSEAL_WEIGHT_NORM_WARNING = r"`torch\.nn\.utils\.weight_norm` is deprecated"
@@ -172,6 +178,7 @@ class WatermarkResult:
     verified: bool
     method: str
     detail: str
+    payload: dict | None = None
 
 
 @contextmanager
@@ -208,10 +215,15 @@ def watermark_audio_bytes(
     device: str = "cpu",
     verify: bool = True,
     verify_threshold: float = 0.5,
+    evidence_out: dict | None = None,
+    max_bit_errors: int = 0,
 ) -> bytes:
     """Embed an AudioSeal watermark into an audio byte stream (24 kHz mono processing)."""
     import soundfile as sf
     import torch
+
+    if type(max_bit_errors) is not int or not 0 <= max_bit_errors <= MAX_PAYLOAD_BIT_ERRORS:
+        raise ValueError("AudioSeal payload tolerance must be between zero and two bits.")
 
     source_sha256 = hashlib.sha256(audio_data).hexdigest()
     msg = _derive_16bit_message(secret_key, content_id, source_sha256).to(device)
@@ -274,8 +286,43 @@ def watermark_audio_bytes(
                 raise RuntimeError(
                     "AudioSeal verification failed: detector returned an invalid message shape."
                 )
+            if not torch.isfinite(detected_msg).all():
+                raise RuntimeError("AudioSeal verification failed: non-finite message probabilities.")
             expected = msg.to(detected_msg.device)
-            if not torch.equal((detected_msg > 0.5).to(expected.dtype), expected):
+            decoded = (detected_msg > 0.5).to(expected.dtype)
+            exact = torch.equal(decoded, expected)
+            bit_errors = 0 if exact else 16
+            if evidence_out is not None or max_bit_errors:
+                expected_bits = "".join(str(int(bit)) for bit in expected.detach().cpu().tolist()[0])
+                decoded_bits = "".join(str(int(bit)) for bit in decoded.detach().cpu().tolist()[0])
+                bit_errors = sum(a != b for a, b in zip(expected_bits, decoded_bits))
+            if evidence_out is not None:
+                evidence_out.update({
+                    "schema": PAYLOAD_SCHEMA,
+                    "derivation": PAYLOAD_DERIVATION,
+                    "generator": "audioseal_wm_16bits",
+                    "detector": "audioseal_detector_16bits",
+                    "message_bits": 16,
+                    "expected_bits": expected_bits,
+                    "source_sha256": source_sha256,
+                    "content_id": content_id,
+                    "attribution_id": attribution_id(content_id, source_sha256),
+                    "sample_rate": sr,
+                    "start_sample": 0,
+                    "sample_count": int(wav.shape[-1]),
+                    "embedding_strength": 1.0,
+                    "generation_verification": {
+                        "presence_score": confidence,
+                        "frame_detection_threshold": 0.5,
+                        "presence_threshold": verify_threshold,
+                        "decoded_bits": decoded_bits,
+                        "bit_errors": bit_errors,
+                        "payload_status": "exact" if exact else "partial",
+                        "max_bit_errors": max_bit_errors,
+                        "partial_presence_threshold": PARTIAL_PAYLOAD_MIN_PRESENCE,
+                    },
+                })
+            if not exact and not partial_payload_accepted(bit_errors, confidence, max_bit_errors):
                 raise RuntimeError(
                     "AudioSeal verification failed: embedded message did not round-trip."
                 )
@@ -306,6 +353,7 @@ def watermark_audio_bytes_best_effort(
         and runtime.cpu_after_cuda_failure
     )
     started = time.perf_counter()
+    evidence: dict = {}
     try:
         resolved_device = (
             "cpu" if previous_fallback else resolve_audioseal_device(requested_device)
@@ -322,12 +370,19 @@ def watermark_audio_bytes_best_effort(
             device=resolved_device,
             verify=True,
             verify_threshold=0.5,
+            evidence_out=evidence,
+            max_bit_errors=MAX_PAYLOAD_BIT_ERRORS,
         )
         detail = (
             "verified; requested=auto; device=cpu; fallback_from=cuda"
             if previous_fallback
             else f"verified; requested={requested_device}; device={resolved_device}"
         )
+        quality = evidence.get("generation_verification", {})
+        if quality.get("bit_errors", 0):
+            detail += f"; payload=partial; bit_errors={quality['bit_errors']}/16"
+            log.warning("AudioSeal payload partially recovered for %s: %d/16 bit errors (maximum %d).",
+                        content_id, quality["bit_errors"], MAX_PAYLOAD_BIT_ERRORS)
         log.info(
             "AudioSeal verified %s on %s in %.3fs",
             content_id,
@@ -335,7 +390,7 @@ def watermark_audio_bytes_best_effort(
             time.perf_counter() - started,
         )
         return WatermarkResult(
-            applied=True, verified=True, method="audioseal", detail=detail
+            applied=True, verified=True, method="audioseal", detail=detail, payload=evidence or None
         ), out_bytes
     except AudioSealCompatibilityError as exc:
         log.warning("Audio watermarking skipped for %s (%s)", content_id, exc)
@@ -359,6 +414,7 @@ def watermark_audio_bytes_best_effort(
             except Exception:
                 pass
             try:
+                evidence.clear()
                 out_bytes = watermark_audio_bytes(
                     audio_data,
                     content_id=content_id,
@@ -366,15 +422,22 @@ def watermark_audio_bytes_best_effort(
                     device="cpu",
                     verify=True,
                     verify_threshold=0.5,
+                    evidence_out=evidence,
+                    max_bit_errors=MAX_PAYLOAD_BIT_ERRORS,
                 )
                 detail = "verified; requested=auto; device=cpu; fallback_from=cuda"
+                quality = evidence.get("generation_verification", {})
+                if quality.get("bit_errors", 0):
+                    detail += f"; payload=partial; bit_errors={quality['bit_errors']}/16"
+                    log.warning("AudioSeal payload partially recovered for %s: %d/16 bit errors (maximum %d).",
+                                content_id, quality["bit_errors"], MAX_PAYLOAD_BIT_ERRORS)
                 log.info(
                     "AudioSeal verified %s on CPU after fallback in %.3fs",
                     content_id,
                     time.perf_counter() - started,
                 )
                 return WatermarkResult(
-                    applied=True, verified=True, method="audioseal", detail=detail
+                    applied=True, verified=True, method="audioseal", detail=detail, payload=evidence or None
                 ), out_bytes
             except Exception as cpu_exc:
                 detail = f"automatic CUDA/ROCm attempt failed ({exc}); CPU retry failed ({cpu_exc})"

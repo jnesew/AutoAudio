@@ -12,7 +12,8 @@ if __package__ in {None, ""}:
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from provenance.ai_marking import AI_MARKING_COMMENT, AI_MARKING_SCHEMA, LEGACY_COMFYUI_AI_MARKING_COMMENT, load_ai_marking_manifest
+from provenance.ai_marking import AI_MARKING_COMMENT, SUPPORTED_MARKING_SCHEMAS, LEGACY_COMFYUI_AI_MARKING_COMMENT, load_ai_marking_manifest
+from provenance.payloads import validate_payloads
 
 
 AI_TAGS = {
@@ -82,7 +83,7 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
             errors.append(f"invalid manifest ({manifest_path}): {exc}")
             manifest = {}
 
-        if manifest.get("schema") != AI_MARKING_SCHEMA:
+        if manifest.get("schema") not in SUPPORTED_MARKING_SCHEMAS:
             errors.append(f"unexpected manifest schema for {artifact.name}: {manifest.get('schema')!r}")
         if manifest.get("artifact") != artifact.name:
             errors.append(f"manifest artifact name mismatch for {artifact.name}")
@@ -138,40 +139,146 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
     return (not errors), errors
 
 
+def inspect_artifact(
+    artifact: Path, *, check_signal=False, check_signature=False, require_trusted=False,
+    tool="c2patool", trust_anchors=None, device="cpu",
+    require_exact_payload=False,
+) -> dict:
+    metadata_ok, metadata_errors = verify_artifact(artifact)
+    errors = list(metadata_errors)
+    report = {
+        "artifact": str(artifact),
+        "integrity": {"status": "valid" if metadata_ok else "invalid", "method": "sidecar-hash-and-metadata"},
+        "signature": {"signature": "not_checked", "binding": "not_checked", "trust": "unknown"},
+        "signal": {"detection": "not_checked", "payload": "not_checked", "coverage": "not_checked", "spans": []},
+        "evidence_source": "unavailable",
+        "errors": errors,
+    }
+    marking = None
+    try:
+        if _manifest_path(artifact).is_file():
+            marking = _load_manifest(_manifest_path(artifact))
+    except ValueError:
+        pass  # The ordinary metadata audit already records this failure.
+    evidence = None
+    if marking and marking.get("watermark_payloads"):
+        evidence = {
+            "payloads": marking["watermark_payloads"],
+            "complete": marking["watermark_payloads_complete"],
+            "provider": marking.get("provider"),
+        }
+        report["evidence_source"] = "unsigned-sidecar"
+    need_signature = check_signature or require_trusted or bool(trust_anchors) or (check_signal and marking is None)
+    if need_signature:
+        from provenance.signature import inspect_signature
+        try:
+            signature = inspect_signature(artifact, tool=tool, trust_anchors=trust_anchors)
+            report["signature"] = {key: value for key, value in signature.items() if key != "evidence"}
+            signed = signature.get("evidence")
+            if signature["signature"] != "valid" or signature["binding"] != "valid":
+                errors.append("C2PA signature or asset binding is absent or invalid.")
+            elif signed:
+                if evidence and evidence != signed:
+                    errors.append("Sidecar watermark evidence differs from the signed C2PA record.")
+                evidence = signed
+                report["evidence_source"] = "signed-c2pa"
+                if not _manifest_path(artifact).exists():
+                    errors[:] = [error for error in errors if not error.startswith("missing manifest:")]
+                    report["integrity"] = {"status": "valid" if not errors else "invalid", "method": "c2pa-hard-binding-and-metadata"}
+            if require_trusted and signature["trust"] != "trusted":
+                errors.append("C2PA signer is not trusted by the selected trust anchors.")
+        except Exception as exc:
+            report["signature"] = {"signature": "error", "binding": "not_established", "trust": "unknown"}
+            errors.append(f"C2PA check failed: {exc}")
+    if check_signal:
+        from provenance.signal import verify_signal
+        try:
+            signal = verify_signal(
+                artifact, validate_payloads(evidence["payloads"]) if evidence else (),
+                device=device, complete=bool(evidence and evidence["complete"]),
+            )
+            report["signal"] = signal
+            if signal["detection"] != "detected":
+                errors.append("Watermark signal detection did not pass or no payload timeline is available.")
+            if signal["payload"] not in {"exact", "partial"} or (require_exact_payload and signal["payload"] != "exact"):
+                errors.append("Watermark payload recovery does not meet the requested policy.")
+            if signal["coverage"] != "complete":
+                errors.append("Payload timeline coverage is incomplete or unavailable.")
+        except Exception as exc:
+            report["signal"] = {"detection": "error", "payload": "not_established", "coverage": "not_established", "spans": []}
+            errors.append(f"Signal check failed: {exc}")
+    report["checks_passed"] = not errors
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Verify AutoAudio AI-marking metadata, final hashes, and watermark manifests."
+        description="Audit audio integrity, optional AudioSeal waveform/payload recovery, and C2PA signatures."
     )
-    parser.add_argument("--output-dir", required=True, help="AutoAudio output directory to inspect")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--output-dir", help="AutoAudio output directory to inspect")
+    source.add_argument("--file", help="One audio file to inspect, including an embedded signed payload record")
     parser.add_argument(
         "--include-segments",
         action="store_true",
         help="Also verify cached segment artifacts under <output-dir>/.segments",
     )
+    parser.add_argument("--check-signal", action="store_true", help="Decode each retained payload span with AudioSeal (can load/download models)")
+    parser.add_argument("--require-exact-payload", action="store_true", help="Require zero payload bit errors; implies --check-signal")
+    parser.add_argument("--check-signature", action="store_true", help="Validate embedded C2PA signature and asset binding")
+    parser.add_argument("--require-trusted-signature", action="store_true", help="Require a valid signature and a trusted signer")
+    parser.add_argument("--trust-anchors", help="Local PEM trust-anchor bundle; implies a signature check")
+    parser.add_argument("--provenance-tool", default="c2patool")
+    parser.add_argument("--watermark-device", choices=("cpu", "cuda", "auto"), default="cpu")
+    parser.add_argument("--json", action="store_true", help="Emit separate integrity, detection, payload, signature, and trust results as JSON")
     args = parser.parse_args(argv)
 
-    output_dir = Path(args.output_dir).expanduser().resolve()
-    if not output_dir.exists() or not output_dir.is_dir():
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else None
+    if output_dir is not None and not output_dir.is_dir():
         print(f"ERROR: output directory not found: {output_dir}", file=sys.stderr)
         return 2
 
-    candidates = _iter_audio_files(output_dir, include_segments=args.include_segments)
+    if output_dir is not None:
+        candidates = _iter_audio_files(output_dir, include_segments=args.include_segments)
+    else:
+        artifact = Path(args.file).expanduser().resolve()
+        if not artifact.is_file() or artifact.suffix.lower() not in AUDIO_EXTENSIONS:
+            print(f"ERROR: audio file not found or unsupported: {artifact}", file=sys.stderr)
+            return 2
+        candidates = [artifact]
     if not candidates:
         print(f"ERROR: no publishable audio artifacts found in {output_dir}", file=sys.stderr)
         return 2
 
     failed = 0
+    reports = []
     for artifact in candidates:
-        ok, errors = verify_artifact(artifact)
+        result = inspect_artifact(
+            artifact, check_signal=args.check_signal or args.require_exact_payload, check_signature=args.check_signature,
+            require_trusted=args.require_trusted_signature, tool=args.provenance_tool,
+            trust_anchors=args.trust_anchors, device=args.watermark_device,
+            require_exact_payload=args.require_exact_payload,
+        )
+        reports.append(result)
+        ok, errors = result["checks_passed"], result["errors"]
+        if args.json:
+            failed += not ok
+            continue
         if ok:
             print(f"OK  {artifact}")
-            continue
-        failed += 1
-        print(f"FAIL {artifact}")
+        else:
+            failed += 1
+            print(f"FAIL {artifact}")
+        print(f"  integrity={result['integrity']['status']}; signal={result['signal']['detection']}; "
+              f"payload={result['signal']['payload']}; signature={result['signature']['signature']}; "
+              f"signer_trust={result['signature']['trust']}")
         for error in errors:
             print(f"  - {error}")
 
-    print(f"\nChecked {len(candidates)} artifact(s); failures: {failed}")
+    if args.json:
+        print(json.dumps({"schema": "autoaudio.verification.v1", "artifacts": reports, "failures": failed}, indent=2))
+    else:
+        print(f"\nChecked {len(candidates)} artifact(s); failures: {failed}")
     return 1 if failed else 0
 
 

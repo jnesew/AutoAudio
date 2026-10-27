@@ -171,6 +171,7 @@ def test_audioseal_verifies_serialized_pcm_and_required_message(
     torch_module.clamp = Mock(side_effect=lambda tensor, _minimum, _maximum: tensor)
     torch_module.is_tensor = lambda value: isinstance(value, _FakeTensor)
     torch_module.equal = Mock(return_value=message_matches)
+    torch_module.isfinite = lambda _value: SimpleNamespace(all=lambda: True)
 
     soundfile_module = ModuleType("soundfile")
     decoded_streams = []

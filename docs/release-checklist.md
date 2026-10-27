@@ -23,8 +23,11 @@ configuration, and known-limit findings into the maintained guides before releas
 - Measure cold and warm AudioSeal CPU calls with representative speech. Check thread/backend tuning and
   serialized identifying-message verification; qualify GPU behavior separately on suitable hardware.
 - Run `autoaudio-verify --output-dir <test-output>` and distinguish artifact/hash evidence from direct
-  signal-level watermark checks. See [Resume, watermarking, and provenance](provenance-and-resume.md).
+  signal-level watermark checks. Exercise `--check-signal` on final FLAC/MP3/M4B, partial/exact recovery,
+  and `--require-exact-payload`. See [Resume, watermarking, and provenance](provenance-and-resume.md).
 - Exercise C2PA signing, parse-back validation, and both soft-fail/hard-fail policies on supported formats.
+  Verify a renamed signed file without its sidecar, distinguish signer trust from signature validity,
+  and confirm changed asset bytes fail binding. Keep test credentials out of packages and source control.
 - Check startup and provider selection do not issue requests. Test samples/discovery through their explicit
   actions and ensure ComfyUI pause cannot interrupt unrelated server work.
 

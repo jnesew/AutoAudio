@@ -78,6 +78,10 @@ Audit retained chapter and part files after conversion:
 autoaudio-verify --output-dir /path/to/audiobook
 ```
 
-The command reports missing AI metadata, invalid watermark evidence, and stale final-file hashes.
-See [Watermarking and provenance](provenance-and-resume.md) for the difference between artifact auditing
-and direct signal verification, as well as optional C2PA signing.
+The default audit reports missing AI metadata, invalid recorded watermark evidence, and stale final-file hashes. To test watermark recovery on the exported waveform, including lossy formats:
+
+```bash
+autoaudio-verify --file /path/to/chapter.m4b --check-signal --json
+```
+
+Add `--check-signature` to validate optional C2PA provenance, or `--require-exact-payload` to require zero payload errors. See [Watermarking and provenance](provenance-and-resume.md) for evidence requirements, partial-recovery policy, signer trust, and legacy output limitations.

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from core.version import default_claim_generator
+from provenance.ai_marking import load_ai_marking_manifest, manifest_path_for
 
 
 class ProvenanceError(RuntimeError):
@@ -133,9 +134,27 @@ class C2PAAssertionBuilder:
 
     def _build_pipeline_assertion(self) -> dict[str, Any]:
         artifact = Path(self.artifact_path)
+        evidence = {}
+        sidecar = manifest_path_for(artifact)
+        if sidecar.is_file():
+            try:
+                marking = load_ai_marking_manifest(sidecar)
+            except ValueError as exc:
+                raise ProvenanceError(f"Cannot sign invalid watermark evidence: {exc}") from exc
+            if marking.get("watermark_payloads"):
+                if marking.get("artifact_sha256") != _sha256_hex(artifact):
+                    raise ProvenanceError("Cannot sign watermark evidence for changed audio bytes.")
+                evidence = {
+                    "watermark_evidence": {
+                        "payloads": marking["watermark_payloads"],
+                        "complete": marking["watermark_payloads_complete"],
+                        "provider": marking["provider"],
+                    }
+                }
         return {
             "label": "com.autoaudio.pipeline",
             "data": {
+                **evidence,
                 "artifact": artifact.name,
                 "container_embedding": self.embedding_path,
                 "source_sha256": _sha256_hex(artifact),

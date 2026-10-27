@@ -6,9 +6,18 @@ At the beginning of a job, AutoAudio generates and checkpoints one neutral discl
 
 ## AudioSeal marking
 
-Every generated narration segment is converted to 24 kHz mono audio, marked with AudioSeal, and immediately passed through the AudioSeal detector. Unverified output is rejected before assembly.
+Every generated narration segment is converted to 24 kHz mono audio, marked with AudioSeal, serialized, and immediately passed through the AudioSeal detector. Output that fails the acceptance policy is rejected before assembly.
 
-Each mark carries a deterministic 16-bit message derived from the segment content ID, its pre-watermark audio SHA-256, and the configured watermark key. AutoAudio requires an AudioSeal API capable of embedding that message; it never falls back to an unidentified watermark. The public default key makes the payload reproducible rather than secret. Deployments may set `AUTOAUDIO_WATERMARK_SECRET` to a stable private value, but changing it does not make an already assembled audiobook retroactively verifiable from its final container alone.
+Each mark carries a deterministic 16-bit message derived from the segment content ID, its pre-watermark audio SHA-256, and the configured watermark key. AutoAudio requires an AudioSeal API capable of embedding that message; it never falls back to an unidentified watermark. The public default key makes the payload reproducible rather than secret. Deployments may set `AUTOAUDIO_WATERMARK_SECRET` to a stable private value. This is a symmetric derivation key, not a public signing key; increasing its length does not increase AudioSeal's 16-bit payload capacity.
+
+Generation accepts either:
+
+- An exact 16-bit recovery with a watermark-presence score of at least **0.5**.
+- **One or two wrong bits**, with a watermark-presence score of at least **0.9**. This is recorded and logged as partial recovery.
+
+Three or more wrong bits, insufficient presence, malformed detector output, or non-finite results fail verification. The thresholds apply to the serialized marked waveform. A presence score describes detector output, not the probability that the recording is synthetic or that an attribution is correct. Two-bit tolerance accepts 137 of the 65,536 possible bit patterns around an expected identifier; that combinatorial count is not an empirically calibrated false-attribution rate. Treat a payload match as supporting evidence and use signed provenance when attribution matters.
+
+AudioSeal detects a watermark that can also be applied to a human recording. Its presence alone cannot prove synthetic origin. The synthetic-origin declaration is a claim made by the generating software and, when signed, by the signer. The public AudioSeal model is not an authenticity authority. See the [AudioSeal documentation](https://github.com/facebookresearch/audioseal) for its detection and message-recovery capabilities.
 
 The default `--watermark-device auto` setting prefers CUDA when PyTorch reports it available, including AMD ROCm installations, and retries on CPU if automatic GPU execution fails. Explicit `cpu` and `cuda` selections are strict. `AUTOAUDIO_WATERMARK_DEVICE` provides a process-level override.
 
@@ -30,10 +39,9 @@ Sidecars distinguish two evidence scopes:
 
 Lossless assembly validates every source sidecar and source hash. Final-container hashes are refreshed after all output mutations.
 
-`autoaudio-verify` audits container metadata, recorded watermark evidence, and final-file hashes. It does
-not rerun the AudioSeal detector on the exported MP3/M4B waveform. Direct signal/message verification
-happens on the serialized marked audio before assembly and export; the final audit is a different evidence
-scope and does not establish watermark survival after a lossy encode.
+New schema-v3 sidecars retain the expected bits, full pre-watermark source SHA-256, a full SHA-256 attribution ID, model/derivation identifiers, and actual generation detection results. Expected bits are public verification data; the derivation secret is not included. The full attribution ID identifies a record but is not embedded as a larger AudioSeal message and is not a cryptographic signature. Each payload has a sample range on the normalized 24 kHz timeline. Assembly offsets these ranges across disclosures, silence, segments, and repeated chapters, and preserves them during export.
+
+The default `autoaudio-verify` command audits container metadata, recorded watermark evidence, and final-file hashes. It does not load AudioSeal models or establish watermark survival after lossy encoding. Add `--check-signal` to decode the exported waveform and check every retained payload range, including MP3/M4B. The report separates signal presence, exact/partial payload recovery, timeline coverage, file integrity, signature validity, and signer trust.
 
 Verify retained output with:
 
@@ -42,6 +50,16 @@ autoaudio-verify --output-dir "/path/to/audiobook"
 ```
 
 Add `--include-segments` when auditing a job that still retains segment-cache files. Internal `.autoaudio_state` audio is excluded from the publishable-output audit.
+
+For a waveform check and machine-readable diagnostics:
+
+```bash
+autoaudio-verify --file "/path/to/chapter.mp3" --check-signal --json
+```
+
+Use `--require-exact-payload` to require zero bit errors; this implies `--check-signal`. Signal checks default to CPU, may download AudioSeal models on first use, and can take time for long books. Files are decoded once in timeline order to preserve codec priming and avoid repeated seeking. Individual payload ranges longer than ten minutes are rejected by this verifier. Editing, cropping, resampling, or re-encoding outside AutoAudio may invalidate the recorded timeline, signature, or recovered message; a failed check is not proof that a recording is human.
+
+An unsigned sidecar is useful for local integrity checks but can be replaced with the audio. It cannot authenticate an author or source. For a signed export, use `--check-signature` with the optional C2PA tooling described below.
 
 ## Optional C2PA provenance
 
@@ -53,12 +71,32 @@ The manifest records:
 - AutoAudio and its runtime version.
 - For ComfyUI, the effective node class and an explicit backend version when the workflow supplies one.
 - A digest explicitly scoped to the encoded source bytes before C2PA embedding.
+- The public expected AudioSeal payload records, their sample ranges, and whether all generated speech has records.
 
 The C2PA tool creates the container-specific hard binding. After embedding, AutoAudio rehashes the complete final container and refreshes its AI-marking sidecar and checkpoint records.
 
 AutoAudio validates the newly signed container before replacing the unsigned artifact. Temporary signing files are created beside the output so replacement remains atomic even when the system temporary directory is on another filesystem. Current `c2patool` releases require an M4A filename while initially signing an M4B container; AutoAudio uses an internal M4A alias and restores the requested M4B filename without changing the signed bytes.
 
 Use `--provenance-failure-mode hard-fail` when unsigned output must never be accepted. Certificate and private-key paths can be checkpointed as configuration; private-key passwords are never persisted.
+
+Verify the embedded signature and asset binding separately from waveform recovery:
+
+```bash
+autoaudio-verify --file "/path/to/chapter.m4b" --check-signal --check-signature
+```
+
+A valid C2PA signature binds its recorded claims to the asset; it does not establish that the signer is trustworthy or that every claim is true. The verifier reports an untrusted signer separately from an invalid signature. To require trust, supply a local PEM anchor bundle obtained through a trusted channel:
+
+```bash
+autoaudio-verify --file "/path/to/chapter.m4b" --check-signal \
+  --require-trusted-signature --trust-anchors "/path/to/trusted-anchors.pem"
+```
+
+The verifier uses isolated C2PA settings and does not modify the user's trust store. Trust anchors are a verification policy, not proof of identity merely because a certificate accompanies a file. Public demo credentials must never be used to establish production trust.
+
+New signed exports contain their payload records inside the C2PA assertion. They can be verified after renaming and sharing, without the original job, audio source, watermark secret, or sidecar. When no sidecar is present, `--check-signal` attempts embedded C2PA verification automatically. A valid signature and asset binding are required before using those records; any conflicting sidecar is reported. Unsigned files need their sidecars for expected payloads.
+
+Schema-v2 sidecars remain usable for resume and the ordinary metadata/hash audit. They lack the public payload timeline needed for retrospective signal attribution; the verifier reports that evidence as unavailable. A resumed job containing both old and new segments reports partial coverage and cannot pass a complete signal audit. New records do not fabricate evidence for previously generated audio. The frozen plan compatibility identity remains unchanged; schema-v3 sidecars require this version of AutoAudio to read them.
 
 ## BookPlan and checkpoint contract
 

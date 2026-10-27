@@ -102,7 +102,7 @@ from metadata.gutenberg import fetch_gutenberg_metadata
 from metadata.id_utils import guess_gutenberg_id
 from metadata.models import BookMetadata, MetadataSources, merge_metadata
 from provenance.ai_marking import (
-    AI_MARKING_SCHEMA,
+    AI_MARKING_COMPATIBILITY_SCHEMA,
     ai_marking_metadata_args,
     cleanup_orphan_manifests,
     manifest_path_for,
@@ -374,6 +374,8 @@ def write_watermarked_audio_artifact(
         watermark_applied=watermark_result.applied,
         watermark_verified=watermark_result.verified,
         watermark_detail=watermark_result.detail,
+        payloads=(watermark_result.payload,) if getattr(watermark_result, "payload", None) else (),
+        payloads_complete=bool(getattr(watermark_result, "payload", None)),
         provider=ai_provider,
     )
 
@@ -1131,7 +1133,7 @@ def _run_pipeline(
         "chapter_disclosure_policy": CHAPTER_DISCLOSURE_POLICY_VERSION,
         "chapter_disclosure_text": CHAPTER_DISCLOSURE_TEXT,
         "audio_assembly_policy": AUDIO_ASSEMBLY_POLICY_VERSION,
-        "ai_marking_schema": AI_MARKING_SCHEMA,
+        "ai_marking_schema": AI_MARKING_COMPATIBILITY_SCHEMA,
         "disclosure_gap_ms": disclosure_gap_ms,
         "segment_gap_ms": segment_gap_ms,
         "chapter_gap_ms": chapter_gap_ms,

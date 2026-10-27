@@ -116,7 +116,7 @@ setting when benchmarking favors it. Compare cold and warm calls on the current 
 depends on the backend and input shapes. The override affects CPU detection, restores the previous
 backend flag, and keeps the serialized waveform and 16-bit message checks.
 
-Each marked WAV is decoded again for verification, including the identifying 16-bit message. The run log records the selected device and elapsed watermark time. CPU, CUDA, and AMD ROCm still use the same device selection rules; a CPU-wheel installation cannot use a GPU even if the machine has one.
+Each marked WAV is decoded again for verification, including the identifying 16-bit message. At most two wrong bits are accepted with a presence score of at least 0.9; partial recovery is recorded explicitly. See [watermark verification policy](provenance-and-resume.md#audioseal-marking). The run log records the selected device and elapsed watermark time. CPU, CUDA, and AMD ROCm still use the same device selection rules; a CPU-wheel installation cannot use a GPU even if the machine has one.
 
 Use a bounded local benchmark without contacting a provider:
 
