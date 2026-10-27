@@ -8,6 +8,21 @@ autoaudio --gui
 
 Follow **Book → Voice → Preview → Output** to review narration and create an audiobook.
 
+### Linux application launcher
+
+To add AutoAudio to the application menu and associate its taskbar icon, run this in the Python
+environment where AutoAudio is installed:
+
+```bash
+python -m gui.desktop
+```
+
+This installs a per-user desktop entry under `$XDG_DATA_HOME/applications` (normally
+`~/.local/share/applications`), pointing to that environment's `autoaudio` command and packaged icon.
+Launch **AutoAudio** from the application menu and pin it to the taskbar if desired. Rerun the command
+if you move or replace the Python environment. Qt uses the same desktop-entry identifier for window
+association; see [Qt's desktop-file guidance](https://doc.qt.io/qt-6/qguiapplication.html#desktopFileName-prop).
+
 ## Library and Find books
 
 **Library** lists books in the configured source directory and saved runs. Select a book to work on its

@@ -67,6 +67,7 @@ def test_packaging_contract_includes_runtime_packages_resources_and_notices():
     assert set(setuptools["package-data"]["autoaudio_resources"]) == {
         "narrators/*.json",
         "workflows/*.json",
+        "icons/*.png",
     }
     assert set(project["project"]["license-files"]) == {
         "LICENSE",
@@ -83,6 +84,7 @@ def test_source_checkout_app_config_resolves_bundled_resources():
     assert config.narrator_profiles_path.is_file()
     assert config.workflow_path_for("preset").is_file()
     assert config.workflow_path_for("design").is_file()
+    assert config.app_icon_path.is_file()
 
 
 def test_local_documentation_links_resolve():

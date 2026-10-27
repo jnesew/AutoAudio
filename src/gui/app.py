@@ -12,6 +12,12 @@ def launch_gui(project_root: Path) -> int:
             "PySide6 is required for --gui mode. Install project GUI dependencies."
         ) from exc
     app = QApplication.instance() or QApplication([])
+    from gui.desktop import DESKTOP_FILE_ID
+
+    app.setApplicationName("AutoAudio")
+    app.setApplicationDisplayName("AutoAudio")
+    app.setDesktopFileName(DESKTOP_FILE_ID)
     window = MainWindow(project_root)
+    app.setWindowIcon(window.windowIcon())
     window.show()
     return app.exec()

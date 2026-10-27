@@ -24,7 +24,7 @@ from metadata.gutenberg_catalog import (
     GutenbergSearchPage,
 )
 from tts import discover_provider_voices
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QIcon, QTextCursor
 from PySide6.QtCore import QSignalBlocker, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -232,6 +232,7 @@ class MainWindow(WorkflowMixin, QMainWindow):
         self.parser = build_argument_parser(project_root)
         self.default_args = self.parser.parse_args([])
         self.app_config = AppConfig(project_root=self.project_root)
+        self.setWindowIcon(QIcon(str(self.app_config.app_icon_path)))
         self.narrator_catalog = NarratorCatalog.load(
             self.app_config.narrator_profiles_path
         )

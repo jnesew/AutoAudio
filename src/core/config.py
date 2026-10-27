@@ -110,6 +110,10 @@ class AppConfig:
     def narrator_profiles_path(self) -> Path:
         return self.resource_dir / "narrators" / self.narrator_profiles_filename
 
+    @property
+    def app_icon_path(self) -> Path:
+        return self.resource_dir / "icons" / "autoaudio.png"
+
     @staticmethod
     def state_dir_for(output_dir: str | Path) -> Path:
         """Keep resumable state scoped to the output job rather than the installation."""

@@ -76,6 +76,8 @@ def test_initial_setup_finds_book_and_provider_changes_stay_offline(setup_window
     assert not window.resume_btn.isEnabled()
     assert not window.cancel_btn.isEnabled()
     assert window.watermark_device_combo.currentText() == "auto"
+    assert not window.windowIcon().isNull()
+    assert not window.windowIcon().pixmap(32, 32).isNull()
     for provider in ("openai-compatible", "elevenlabs", "comfyui"):
         window.tts_provider_combo.setCurrentText(provider)
         assert window._collect_args(resume_mode="no").tts_provider == provider
