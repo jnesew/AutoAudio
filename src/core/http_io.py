@@ -16,7 +16,10 @@ def read_response_bytes(
     """Bound response memory and check cancellation/deadlines between reads."""
     headers = getattr(response, "headers", None)
     length = headers.get("Content-Length") if headers is not None else None
-    if length is not None:
+    transfer_encoding = headers.get("Transfer-Encoding", "") if headers is not None else ""
+    declared = None
+    # urllib decodes chunk framing and ignores Content-Length for chunked bodies.
+    if length is not None and str(transfer_encoding).strip().lower() != "chunked":
         try:
             declared = int(length)
         except (TypeError, ValueError):
@@ -37,6 +40,8 @@ def read_response_bytes(
                 cancellation.raise_if_cancelled()
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("Response exceeded its total deadline.")
+            if declared is not None and size != declared:
+                raise OSError(f"HTTP response ended after {size} bytes; expected {declared} bytes.")
             return b"".join(chunks)
         size += len(chunk)
         if size > maximum_bytes:

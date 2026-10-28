@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import socket
@@ -161,7 +162,7 @@ class _HTTPProvider:
                 raise
             except ResponseTooLarge as exc:
                 raise TTSProtocolError(str(exc)) from exc
-            except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+            except (urllib.error.URLError, http.client.HTTPException, TimeoutError, socket.timeout, OSError) as exc:
                 if read_only and attempt + 1 < attempts:
                     if cancellation:
                         cancellation.raise_if_cancelled()

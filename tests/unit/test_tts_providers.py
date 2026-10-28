@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import http.client
 import io
+import json
 import urllib.error
 from unittest.mock import patch
 import sys
@@ -286,9 +287,12 @@ def test_openai_discovery_router_does_not_contact_an_endpoint():
         )
 
 
-@pytest.mark.parametrize("error", (TimeoutError("ambiguous read failure"), urllib.error.HTTPError(
-    "https://example.test", 503, "backend failure", {}, io.BytesIO(b"failed"),
-)))
+@pytest.mark.parametrize("error", (
+    TimeoutError("ambiguous read failure"),
+    http.client.IncompleteRead(b"partial audio"),
+    http.client.BadStatusLine("invalid HTTP response"),
+    urllib.error.HTTPError("https://example.test", 503, "backend failure", {}, io.BytesIO(b"failed")),
+))
 def test_ambiguous_synthesis_failure_is_not_automatically_resubmitted(error):
     calls = []
 
@@ -302,6 +306,24 @@ def test_ambiguous_synthesis_failure_is_not_automatically_resubmitted(error):
     with pytest.raises(TTSConnectionError):
         provider.generate_audio(text_segment="Do not submit this twice.")
     assert len(calls) == 1
+
+
+def test_incomplete_discovery_response_can_retry(monkeypatch):
+    monkeypatch.setenv("TEST_ELEVEN_KEY", "secret")
+    calls = []
+
+    def request(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise http.client.IncompleteRead(b"partial JSON")
+        return FakeResponse(b'{"voices": [], "has_more": false}', "application/json")
+
+    provider = ElevenLabsSpeechProvider(
+        TTSConfig(provider="elevenlabs", api_key_env="TEST_ELEVEN_KEY"),
+        urlopen=request, sleep=lambda _seconds: None,
+    )
+    assert provider.discover_voices(timeout_seconds=3) == ()
+    assert len(calls) == 2
 
 
 def test_large_response_is_rejected_before_unbounded_buffering():

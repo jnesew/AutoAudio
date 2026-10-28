@@ -67,6 +67,10 @@ The adapter implements no upload, instant-clone, professional-clone, or voice-cr
 
 HTTP audio responses are read in chunks with a 64 MiB ceiling; remote voice-list responses have a 2 MiB ceiling. Cancellation and the shared request deadline are checked between reads and retry backoff steps. A blocking connection/header wait is still bounded by the configured socket timeout; this is not an immediate network abort.
 
+Responses that end before their declared `Content-Length`, or have broken chunk framing, are reported
+as connection failures. These failures do not produce a completed provider response or trigger an
+automatic synthesis resubmission.
+
 Read-only discovery can retry transient failures. Synthesis POSTs retry only an explicit HTTP 429 rejection. Ambiguous read/network failures and server errors are reported without automatic resubmission, because the provider may already have accepted or generated the audio. Check provider state before manually retrying an ambiguous synthesis failure.
 
 ## External runtime reproducibility
