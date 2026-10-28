@@ -1,5 +1,9 @@
 # Narration sample for the README
 
+The [published sample](narration-demo%20-%20Part_001.mp3) is a 37-second English rendering of the bundled
+passage using Qwen3-TTS 1.7B and Aiden, including the audible disclosure. Its
+[verification record](narration-demo%20-%20Part_001.mp3.ai.json) retains the expected AudioSeal payloads.
+
 Keep curated public demo clips here. Generate the clip separately from normal library jobs, which remain
 under the ignored `audiobook_output/` directory.
 

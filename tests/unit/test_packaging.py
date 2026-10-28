@@ -4,6 +4,7 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+from urllib.parse import unquote
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -99,7 +100,7 @@ def test_local_documentation_links_resolve():
         for target in link_pattern.findall(document.read_text(encoding="utf-8")):
             if target.startswith(("http://", "https://", "mailto:", "#")):
                 continue
-            relative_target = target.split("#", 1)[0]
+            relative_target = unquote(target.split("#", 1)[0])
             if relative_target and not (document.parent / relative_target).resolve().exists():
                 missing.append(f"{document.relative_to(PROJECT_ROOT)} -> {target}")
 

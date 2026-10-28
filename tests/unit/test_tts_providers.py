@@ -162,12 +162,12 @@ def test_elevenlabs_generation_uses_existing_voice_without_clone_inputs(monkeypa
             model="eleven_multilingual_v2",
             voice="voice/id",
             response_format="mp3_44100_128",
-            language_code="fi",
+            language_code="en",
         ),
         urlopen=urlopen,
     )
 
-    provider.generate_audio(text_segment="Hyvää huomenta.", purpose=purpose)
+    provider.generate_audio(text_segment="Good morning.", purpose=purpose)
 
     request = requests[0]
     assert request.full_url == (
@@ -176,9 +176,9 @@ def test_elevenlabs_generation_uses_existing_voice_without_clone_inputs(monkeypa
     assert request.get_header("Xi-api-key") == "eleven-secret"
     payload = json.loads(request.data)
     assert payload == {
-        "text": "Hyvää huomenta.",
+        "text": "Good morning.",
         "model_id": "eleven_multilingual_v2",
-        "language_code": "fi",
+        "language_code": "en",
     }
     assert not any("reference" in key or "clone" in key for key in payload)
 

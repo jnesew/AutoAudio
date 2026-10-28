@@ -1,0 +1,86 @@
+{
+  "schema": "autoaudio.ai_marking.v3",
+  "artifact": "narration-demo - Part_001.mp3",
+  "artifact_sha256": "558b6eedd20ce4457c6b5a8a050ea57f9ca15d5b70069bbb60fe3ee215ae7e9f",
+  "artifact_hash_scope": "entire-artifact-bytes",
+  "ai_generated": true,
+  "ai_system": "AutoAudio",
+  "provider": "ComfyUI",
+  "content_id": "narration-demo - Part 1",
+  "marking_methods": {
+    "metadata": true,
+    "audio_watermark": {
+      "applied": true,
+      "verified": true,
+      "scope": "source-artifacts",
+      "detail": "Inherited verified source evidence; the final encoded waveform has not been rechecked."
+    }
+  },
+  "source_artifacts": [
+    {
+      "artifact": "chapter_disclosure.flac",
+      "sha256": "8cd0eb23253d62c3dec038809cad832d1e6241aa8b95ceb3b4164cb6f46e8a1c",
+      "watermark_scope": "direct"
+    },
+    {
+      "artifact": "temp_ch1_seg1.flac",
+      "sha256": "48e7fe1eabdda4708d5282e68a732db64e5d3ec8542c43fbc699f38cf4fdb465",
+      "watermark_scope": "direct"
+    }
+  ],
+  "generated_at_utc": "2026-10-28T02:09:20.646759+00:00",
+  "artifact_hash_updated_at_utc": "2026-10-28T02:29:05.692646+00:00",
+  "watermark_payloads": [
+    {
+      "schema": "autoaudio.audioseal-payload.v1",
+      "derivation": "hmac-sha256-trunc16-v1",
+      "generator": "audioseal_wm_16bits",
+      "detector": "audioseal_detector_16bits",
+      "message_bits": 16,
+      "expected_bits": "0000111101011100",
+      "source_sha256": "383df8bfa9193df6e5bab4faf2348587e27c1e865bb6802aa268278cb5b981c8",
+      "content_id": "autoaudio_chapter_disclosure_v2",
+      "attribution_id": "0725c8306620b7046008d513156521963cf79c73f40c86459209b8a730a9b90f",
+      "sample_rate": 24000,
+      "start_sample": 0,
+      "sample_count": 83925,
+      "embedding_strength": 1.0,
+      "generation_verification": {
+        "presence_score": 1.0,
+        "frame_detection_threshold": 0.5,
+        "presence_threshold": 0.5,
+        "decoded_bits": "0000111101011100",
+        "bit_errors": 0,
+        "payload_status": "exact",
+        "max_bit_errors": 2,
+        "partial_presence_threshold": 0.9
+      }
+    },
+    {
+      "schema": "autoaudio.audioseal-payload.v1",
+      "derivation": "hmac-sha256-trunc16-v1",
+      "generator": "audioseal_wm_16bits",
+      "detector": "audioseal_detector_16bits",
+      "message_bits": 16,
+      "expected_bits": "0001101000100010",
+      "source_sha256": "ce5b2d53a5d09e5bf271eb3b417ad9633f9097f7f18f32170d5e5c689435a748",
+      "content_id": "Chapter 1_seg_001",
+      "attribution_id": "81fb067e49c01a040516f36234fb53c8d9b943ab170f79e5dd567f8f48c62723",
+      "sample_rate": 24000,
+      "start_sample": 100725,
+      "sample_count": 780330,
+      "embedding_strength": 1.0,
+      "generation_verification": {
+        "presence_score": 0.9999564290046692,
+        "frame_detection_threshold": 0.5,
+        "presence_threshold": 0.5,
+        "decoded_bits": "0001101000100010",
+        "bit_errors": 0,
+        "payload_status": "exact",
+        "max_bit_errors": 2,
+        "partial_presence_threshold": 0.9
+      }
+    }
+  ],
+  "watermark_payloads_complete": true
+}
