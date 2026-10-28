@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import gzip
 import zipfile
 
 import pytest
@@ -58,6 +59,10 @@ DETAIL_OPDS = b"""<?xml version="1.0" encoding="utf-8"?>
   </entry>
 </feed>
 """
+
+CATALOG_CSV = gzip.compress(b'''Text#,Type,Issued,Title,Language,Authors,Subjects,LoCC,Bookshelves
+11,Text,1865-01-01,Alice's Adventures in Wonderland,en,"Carroll, Lewis",Fantasy,PR,Fiction
+''')
 
 
 class FakeResponse:
@@ -127,32 +132,38 @@ def test_parse_detail_opds_merges_editions_contributors_and_acquisitions():
     assert book.preferred_epub.length == 12345
 
 
-def test_client_search_uses_contact_user_agent_and_caches_identical_page():
+def test_client_search_uses_contact_user_agent_and_persistent_local_catalog(tmp_path):
     requests = []
 
     def opener(request, **_kwargs):
         requests.append(request)
-        return FakeResponse(SEARCH_OPDS, request.full_url)
+        return FakeResponse(CATALOG_CSV, request.full_url)
 
-    client = GutenbergCatalogClient(opener=opener, minimum_request_interval=0)
+    client = GutenbergCatalogClient(opener=opener, minimum_request_interval=0, cache_dir=tmp_path)
     first = client.search("alice")
     second = client.search("alice")
 
-    assert first is second
+    assert first == second
+    assert first.books[0].author_text == "Carroll, Lewis"
+    assert first.books[0].language == "en"
+    assert first.books[0].details_loaded is False
     assert len(requests) == 1
     assert "github.com/jnesew/AutoAudio" in requests[0].get_header("User-agent")
-    assert "query=alice" in requests[0].full_url
+    assert requests[0].full_url.endswith("pg_catalog.csv.gz")
+    restarted = GutenbergCatalogClient(opener=opener, minimum_request_interval=0, cache_dir=tmp_path)
+    assert restarted.search("Carroll").books == first.books
+    assert len(requests) == 1
 
 
-def test_client_loads_only_selected_book_details_and_caches_detail_feed():
+def test_client_loads_only_selected_book_details_and_caches_detail_feed(tmp_path):
     requests = []
 
     def opener(request, **_kwargs):
         requests.append(request)
-        payload = DETAIL_OPDS if request.full_url.endswith("/ebooks/11.opds") else SEARCH_OPDS
+        payload = DETAIL_OPDS if request.full_url.endswith("/ebooks/11.opds") else CATALOG_CSV
         return FakeResponse(payload, request.full_url)
 
-    client = GutenbergCatalogClient(opener=opener, minimum_request_interval=0)
+    client = GutenbergCatalogClient(opener=opener, minimum_request_interval=0, cache_dir=tmp_path)
     result = client.search("alice").books[0]
     detailed = client.load_book_details(result)
     repeated = client.load_book_details(result)

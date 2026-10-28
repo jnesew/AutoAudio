@@ -133,6 +133,10 @@ Metadata precedence is user override, embedded source metadata, fetched metadata
 
 `Ctrl+C` requests cooperative cancellation and returns exit code 130 after resumable state is saved.
 
+The GUI's **Find books** page uses a persistent local Gutenberg catalog. Set
+`AUTOAUDIO_CATALOG_CACHE_DIR` to override its cache directory. See
+[catalog cache and refresh behavior](library-and-gutenberg.md#catalog-cache).
+
 ## C2PA provenance
 
 - `--provenance-enabled`

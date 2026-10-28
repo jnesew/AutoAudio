@@ -30,6 +30,9 @@ configuration, and known-limit findings into the maintained guides before releas
   and confirm changed asset bytes fail binding. Keep test credentials out of packages and source control.
 - Check startup and provider selection do not issue requests. Test samples/discovery through their explicit
   actions and ensure ComfyUI pause cannot interrupt unrelated server work.
+- Exercise the first Gutenberg catalog download, cross-session offline search/filter/pagination,
+  conditional refresh and failed-update fallback. Confirm review fetches one selected title's details
+  and an EPUB request follows download confirmation.
 
 Use isolated output paths and bounded excerpts for routine qualification. A whole-book test requires
 explicit authorization. Record incomplete gates and platform limits accurately; an old report does not

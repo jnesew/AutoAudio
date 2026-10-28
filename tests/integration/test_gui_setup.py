@@ -39,6 +39,58 @@ def wait_until(predicate, timeout=5000):
     assert predicate()
 
 
+def test_find_books_searches_locally_filters_language_and_reviews_one_title(setup_window, tmp_path, monkeypatch):
+    import gzip
+    import io
+    from metadata.gutenberg_catalog import GutenbergCatalogClient
+    from metadata.gutenberg_index import CATALOG_URL
+
+    window, network = setup_window
+    compressed = gzip.compress(b'''Text#,Type,Title,Language,Authors,Subjects
+1727,Text,The Odyssey,en,Homer,Epic poetry
+30615,Text,Odyssey Greek,el,Homer,Epic poetry
+''')
+    detail = b'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dcterms="http://purl.org/dc/terms/">
+<entry><id>urn:gutenberg:1727:3</id><title>The Odyssey</title><author><name>Homer</name></author>
+<dcterms:language>en</dcterms:language><rights>Public domain in the USA.</rights>
+<link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="/ebooks/1727.epub3.images" title="EPUB3 with images"/>
+</entry></feed>'''
+    requests = []
+
+    def opener(request, **_kwargs):
+        requests.append(request.full_url)
+        result = io.BytesIO(compressed if request.full_url == CATALOG_URL else detail)
+        result.headers = {}
+        result.geturl = lambda: request.full_url
+        return result
+
+    window.catalog_client = GutenbergCatalogClient(cache_dir=tmp_path / "catalog", opener=opener,
+                                                    minimum_request_interval=0)
+    window.catalog_search_edit.setText("Homer")
+    window.catalog_search_button.click()
+    wait_until(lambda: window.catalog_thread is None)
+    assert window.catalog_tree.topLevelItemCount() == 2
+    assert {window.catalog_tree.topLevelItem(i).text(2) for i in range(2)} == {"en", "el"}
+    assert "Showing 2 of 2 results" in window.catalog_status.text()
+    window.catalog_language_combo.setCurrentIndex(window.catalog_language_combo.findData("en"))
+    wait_until(lambda: window.catalog_thread is None)
+    assert window.catalog_tree.topLevelItemCount() == 1
+    assert window.catalog_tree.topLevelItem(0).text(1) == "Homer"
+    assert requests == [CATALOG_URL]
+
+    confirmation = Mock()
+    monkeypatch.setattr(window, "_confirm_gutenberg_download", confirmation)
+    window.catalog_tree.setCurrentItem(window.catalog_tree.topLevelItem(0))
+    window.catalog_download_button.click()
+    wait_until(lambda: window.catalog_thread is None and confirmation.called)
+    reviewed = confirmation.call_args.args[0]
+    assert reviewed.details_loaded and reviewed.preferred_epub is not None
+    assert reviewed.gutenberg_id == "1727"
+    assert requests == [CATALOG_URL, "https://www.gutenberg.org/ebooks/1727.opds"]
+    assert window.catalog_language_combo.isEnabled()
+    network.assert_not_called()
+
+
 @pytest.fixture
 def setup_window(tmp_path, monkeypatch, qt_app):
     from gui.window import MainWindow

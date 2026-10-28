@@ -29,9 +29,14 @@ association; see [Qt's desktop-file guidance](https://doc.qt.io/qt-6/qguiapplica
 draft or resume a previous run. You can change the source directory and output root, or browse to a
 manual file on **Book**.
 
-**Find books** searches Project Gutenberg. Select a result and choose **Review & Download** to inspect
-its details and confirm the download. See [Library and book downloads](library-and-gutenberg.md) for
-source locations and copyright information.
+**Find books** searches a saved Gutenberg catalog by title, author, subject, or book ID. The first search
+downloads the catalog (roughly 6 MB); subsequent searches and **More results** work locally. Choose a
+language from the filter after the catalog loads. The status line shows its date and any refresh problem.
+Update checks occur during searches roughly weekly, and an existing catalog remains usable offline.
+
+Select a result and choose **Review & Download** to fetch its current formats and rights, then confirm the
+EPUB download. See [Library and book downloads](library-and-gutenberg.md) for cache locations, refresh
+behavior, and copyright information.
 
 ## Book and voice
 

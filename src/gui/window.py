@@ -25,7 +25,7 @@ from metadata.gutenberg_catalog import (
 )
 from tts import discover_provider_voices
 from PySide6.QtGui import QIcon, QTextCursor
-from PySide6.QtCore import QSignalBlocker, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QLocale, QSignalBlocker, QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -146,18 +147,21 @@ class PipelineWorker(QThread):
 class CatalogSearchWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
+    status = Signal(str)
 
     def __init__(
-        self, client: GutenbergCatalogClient, query: str, page_url: str | None
+        self, client: GutenbergCatalogClient, query: str, page_url: str | None, language: str = ""
     ):
         super().__init__()
         self.client = client
         self.query = query
         self.page_url = page_url
+        self.language = language
 
     def run(self) -> None:
         try:
-            self.completed.emit(self.client.search(self.query, page_url=self.page_url))
+            self.completed.emit(self.client.search(self.query, page_url=self.page_url,
+                                                 language=self.language, progress_callback=self.status.emit))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -347,9 +351,15 @@ class MainWindow(WorkflowMixin, QMainWindow):
         self.catalog_search_edit = QLineEdit()
         self.catalog_search_edit.setPlaceholderText("Title, author, or search term")
         self.catalog_search_edit.returnPressed.connect(self._search_gutenberg)
+        self.catalog_search_edit.textEdited.connect(self._catalog_query_edited)
         self.catalog_search_button = QPushButton("Search")
         self.catalog_search_button.clicked.connect(self._search_gutenberg)
+        self.catalog_language_combo = QComboBox()
+        self.catalog_language_combo.addItem("All languages", "")
+        self.catalog_language_combo.setToolTip("Filter the saved catalog by language")
+        self.catalog_language_combo.currentIndexChanged.connect(self._catalog_language_changed)
         search_row.addWidget(self.catalog_search_edit, 1)
+        search_row.addWidget(self.catalog_language_combo)
         search_row.addWidget(self.catalog_search_button)
         layout.addLayout(search_row)
         notice = QLabel(
@@ -362,6 +372,11 @@ class MainWindow(WorkflowMixin, QMainWindow):
         self.catalog_tree = QTreeWidget()
         self.catalog_tree.setColumnCount(4)
         self.catalog_tree.setHeaderLabels(("Title", "Author", "Language", "EPUB"))
+        self.catalog_tree.header().setStretchLastSection(False)
+        self.catalog_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.catalog_tree.setColumnWidth(1, 300)
+        self.catalog_tree.setColumnWidth(2, 90)
+        self.catalog_tree.setColumnWidth(3, 180)
         self.catalog_tree.setRootIsDecorated(False)
         self.catalog_tree.setAlternatingRowColors(True)
         self.catalog_tree.itemSelectionChanged.connect(
@@ -379,7 +394,8 @@ class MainWindow(WorkflowMixin, QMainWindow):
         controls.addWidget(self.catalog_download_button)
         controls.addStretch(1)
         layout.addLayout(controls)
-        self.catalog_status = QLabel("Enter a search and press Search.")
+        self.catalog_status = QLabel("Search titles and authors. The first search downloads the book catalog (about 6 MB).")
+        self.catalog_status.setWordWrap(True)
         layout.addWidget(self.catalog_status)
         return page
 
@@ -798,12 +814,16 @@ class MainWindow(WorkflowMixin, QMainWindow):
         self.catalog_search_button.setEnabled(False)
         self.catalog_next_button.setEnabled(False)
         self.catalog_download_button.setEnabled(False)
-        self.catalog_status.setText("Searching Project Gutenberg…")
-        self.catalog_worker = CatalogSearchWorker(self.catalog_client, query, page_url)
+        self.catalog_search_edit.setEnabled(False)
+        self.catalog_language_combo.setEnabled(False)
+        self.catalog_status.setText("Searching saved catalog…")
+        self.catalog_worker = CatalogSearchWorker(self.catalog_client, query, page_url,
+                                                 str(self.catalog_language_combo.currentData() or ""))
         self.catalog_thread = self.catalog_worker
         self.catalog_thread.setParent(self)
         self.catalog_worker.completed.connect(self._on_gutenberg_results)
         self.catalog_worker.failed.connect(self._on_gutenberg_error)
+        self.catalog_worker.status.connect(self.catalog_status.setText)
         self.catalog_thread.finished.connect(self._catalog_thread_stopped)
         self.catalog_thread.finished.connect(self.catalog_thread.deleteLater)
         self.catalog_thread.start()
@@ -812,7 +832,29 @@ class MainWindow(WorkflowMixin, QMainWindow):
         if self._catalog_next_url:
             self._search_gutenberg(page_url=self._catalog_next_url)
 
+    def _catalog_language_changed(self, _index: int) -> None:
+        self._catalog_next_url = None
+        self.catalog_next_button.setEnabled(False)
+        if self.catalog_search_edit.text().strip():
+            self._search_gutenberg()
+
+    def _catalog_query_edited(self, _text: str) -> None:
+        self._catalog_next_url = None
+        self.catalog_next_button.setEnabled(False)
+
     def _on_gutenberg_results(self, page: GutenbergSearchPage) -> None:
+        if page.languages:
+            language = self.catalog_language_combo.currentData()
+            with QSignalBlocker(self.catalog_language_combo):
+                self.catalog_language_combo.clear()
+                self.catalog_language_combo.addItem("All languages", "")
+                for code in page.languages:
+                    locale = QLocale(code)
+                    name = QLocale.languageToString(locale.language())
+                    label = f"{name} ({code})" if locale.language() != QLocale.Language.C else code
+                    self.catalog_language_combo.addItem(label, code)
+                index = self.catalog_language_combo.findData(language)
+                self.catalog_language_combo.setCurrentIndex(max(0, index))
         if not self._catalog_append_results:
             self.catalog_tree.clear()
             self._catalog_books.clear()
@@ -835,12 +877,17 @@ class MainWindow(WorkflowMixin, QMainWindow):
             self._update_catalog_item(item, book)
         self._catalog_next_url = page.next_url
         self.catalog_next_button.setEnabled(page.next_url is not None)
-        self.catalog_status.setText(
-            f"Showing {len(self._catalog_books)} result{('s' if len(self._catalog_books) != 1 else '')}."
-        )
+        count = len(self._catalog_books)
+        message = f"Showing {count}" + (f" of {page.total}" if page.total is not None else "") + " results."
+        if page.catalog_date:
+            message += f" Catalog: {page.catalog_date}."
+        if page.notice:
+            message += f" {page.notice}"
+        self.catalog_status.setText(message)
         self._on_catalog_selection_changed()
 
     def _on_gutenberg_error(self, message: str) -> None:
+        self._catalog_next_url = None
         self.catalog_status.setText(f"Search failed: {message}")
         QMessageBox.warning(self, "Project Gutenberg", message)
 
@@ -848,6 +895,8 @@ class MainWindow(WorkflowMixin, QMainWindow):
         self.catalog_thread.wait()
         self.catalog_thread = None
         self.catalog_worker = None
+        self.catalog_search_edit.setEnabled(True)
+        self.catalog_language_combo.setEnabled(True)
         self.catalog_search_button.setEnabled(True)
         self.catalog_next_button.setEnabled(self._catalog_next_url is not None)
         self._on_catalog_selection_changed()
@@ -875,7 +924,8 @@ class MainWindow(WorkflowMixin, QMainWindow):
             )
         ):
             item.setText(column, value)
-        item.setToolTip(0, book.summary or book.landing_url)
+            item.setToolTip(column, value)
+        item.setToolTip(0, f"{book.title}\n\n{book.summary or book.landing_url}")
 
     def _on_catalog_selection_changed(self) -> None:
         selected = self.catalog_tree.selectedItems()
@@ -912,6 +962,8 @@ class MainWindow(WorkflowMixin, QMainWindow):
             self.catalog_download_button.setEnabled(False)
             self.catalog_search_button.setEnabled(False)
             self.catalog_next_button.setEnabled(False)
+            self.catalog_search_edit.setEnabled(False)
+            self.catalog_language_combo.setEnabled(False)
             self.catalog_status.setText(f"Loading details for {book.title}…")
             self.catalog_worker = CatalogDetailsWorker(self.catalog_client, book)
             self.catalog_thread = self.catalog_worker
@@ -973,6 +1025,8 @@ class MainWindow(WorkflowMixin, QMainWindow):
         self.catalog_search_button.setEnabled(False)
         self.catalog_next_button.setEnabled(False)
         self.catalog_status.setText(f"Downloading {book.title}…")
+        self.catalog_search_edit.setEnabled(False)
+        self.catalog_language_combo.setEnabled(False)
         self.catalog_worker = CatalogDownloadWorker(
             self.catalog_client,
             book,

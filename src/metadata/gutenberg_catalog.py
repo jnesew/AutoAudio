@@ -18,6 +18,10 @@ from typing import BinaryIO, Protocol
 from xml.etree import ElementTree
 
 from core.version import AUTOAUDIO_VERSION
+from metadata.gutenberg_index import (
+    GutenbergCatalogIndex, CatalogIndexError, CATALOG_URL, MAX_COMPRESSED_BYTES,
+    PAGE_SIZE, normalize_search,
+)
 
 
 GUTENBERG_OPDS_SEARCH_URL = "https://www.gutenberg.org/ebooks/search.opds/"
@@ -89,10 +93,14 @@ class GutenbergBook:
 class GutenbergSearchPage:
     books: tuple[GutenbergBook, ...]
     next_url: str | None = None
+    total: int | None = None
+    languages: tuple[str, ...] = ()
+    catalog_date: str = ""
+    notice: str = ""
 
 
 class CatalogProvider(Protocol):
-    def search(self, query: str, *, page_url: str | None = None) -> GutenbergSearchPage: ...
+    def search(self, query: str, *, page_url: str | None = None, language: str = "", progress_callback=None) -> GutenbergSearchPage: ...
 
     def load_book_details(self, book: GutenbergBook) -> GutenbergBook: ...
 
@@ -292,7 +300,7 @@ def parse_gutenberg_opds(payload: bytes, *, base_url: str) -> GutenbergSearchPag
 
 
 class GutenbergCatalogClient:
-    """Rate-limited, user-initiated Project Gutenberg OPDS1 client."""
+    """Local CSV discovery with explicit, rate-limited OPDS1 acquisition."""
 
     def __init__(
         self,
@@ -302,6 +310,8 @@ class GutenbergCatalogClient:
         opener: Callable[..., object] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
+        cache_dir: Path | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.minimum_request_interval = max(0.0, minimum_request_interval)
@@ -311,54 +321,96 @@ class GutenbergCatalogClient:
         self._request_lock = threading.Lock()
         self._last_request_at: float | None = None
         self._cache: dict[str, GutenbergSearchPage] = {}
+        self.index = GutenbergCatalogIndex(cache_dir, wall_clock=wall_clock)
 
     @property
     def user_agent(self) -> str:
         return f"AutoAudio/{AUTOAUDIO_VERSION} (+{GUTENBERG_REPOSITORY_CONTACT})"
 
-    def _request(self, url: str, *, accept: str, maximum_bytes: int) -> bytes:
+    def _request(self, url: str, *, accept: str, maximum_bytes: int,
+                 if_modified_since: str | None = None, response_headers: dict | None = None) -> bytes | None:
         validated_url = _validated_gutenberg_url(url)
         with self._request_lock:
             if self._last_request_at is not None:
                 remaining = self.minimum_request_interval - (self.clock() - self._last_request_at)
                 if remaining > 0:
                     self.sleeper(remaining)
-            request = urllib.request.Request(
-                validated_url,
-                headers={"User-Agent": self.user_agent, "Accept": accept},
-            )
+            headers = {"User-Agent": self.user_agent, "Accept": accept, "Accept-Encoding": "identity"}
+            if if_modified_since:
+                headers["If-Modified-Since"] = if_modified_since
+            request = urllib.request.Request(validated_url, headers=headers)
             try:
                 with self.opener(request, timeout=self.timeout_seconds) as response:
                     final_url = response.geturl() if hasattr(response, "geturl") else validated_url
                     _validated_gutenberg_url(str(final_url))
+                    if getattr(response, "status", 200) == 304 and if_modified_since:
+                        return None
+                    if response_headers is not None:
+                        response_headers["Last-Modified"] = getattr(response, "headers", {}).get("Last-Modified")
                     return _read_limited(response, maximum_bytes)
             except GutenbergCatalogError:
                 raise
+            except urllib.error.HTTPError as exc:
+                if exc.code == 304 and if_modified_since:
+                    exc.close()
+                    return None
+                exc.close()
+                raise GutenbergCatalogError(f"Project Gutenberg request failed: HTTP {exc.code}") from exc
             except (OSError, TimeoutError, urllib.error.URLError) as exc:
                 raise GutenbergCatalogError(f"Project Gutenberg request failed: {exc}") from exc
             finally:
                 self._last_request_at = self.clock()
 
-    def search(self, query: str, *, page_url: str | None = None) -> GutenbergSearchPage:
+    def _fetch_catalog(self, modified):
+        headers = {}
+        payload = self._request(CATALOG_URL, accept="application/gzip", maximum_bytes=MAX_COMPRESSED_BYTES,
+                                if_modified_since=modified, response_headers=headers)
+        return payload, headers.get("Last-Modified")
+
+    def search(self, query: str, *, page_url: str | None = None, language: str = "", progress_callback=None) -> GutenbergSearchPage:
         normalized_query = _clean(query)
-        if page_url is None:
-            if not normalized_query:
-                raise GutenbergCatalogError("Enter a title, author, or search term.")
-            if len(normalized_query) > 300:
-                raise GutenbergCatalogError("Project Gutenberg search terms must be 300 characters or fewer.")
-            url = f"{GUTENBERG_OPDS_SEARCH_URL}?{urllib.parse.urlencode({'query': normalized_query})}"
-        else:
-            url = _validated_gutenberg_url(page_url)
-        if url in self._cache:
-            return self._cache[url]
-        payload = self._request(
-            url,
-            accept="application/atom+xml;profile=opds-catalog, application/atom+xml;q=0.9",
-            maximum_bytes=DEFAULT_MAX_CATALOG_BYTES,
-        )
-        page = parse_gutenberg_opds(payload, base_url=url)
-        self._cache[url] = page
-        return page
+        if not normalized_query:
+            raise GutenbergCatalogError("Enter a title, author, or search term.")
+        if len(normalized_query) > 300 or len(normalize_search(normalized_query).split()) > 20:
+            raise GutenbergCatalogError("Use up to 300 characters and 20 search words.")
+        offset, generation = 0, None
+        if page_url:
+            parsed = urllib.parse.urlsplit(page_url)
+            values = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            if (parsed.scheme != "autoaudio-catalog" or parsed.netloc or parsed.path or parsed.fragment
+                    or set(values) != {"query", "language", "offset", "generation"}
+                    or any(len(items) != 1 for items in values.values())):
+                raise GutenbergCatalogError("Invalid local catalog page. Search again.")
+            if values["query"][0] != normalized_query or values["language"][0] != language or not re.fullmatch(r"\d{1,6}", values["offset"][0]):
+                raise GutenbergCatalogError("Catalog search changed. Search again.")
+            offset, generation = int(values["offset"][0]), values["generation"][0]
+        progress = progress_callback or (lambda _message: None)
+        try:
+            if page_url:
+                status = self.index._metadata()
+                if status is None:
+                    raise CatalogIndexError("The saved catalog is unavailable. Search again to rebuild it.")
+            else:
+                status = self.index.ensure(self._fetch_catalog, progress=progress)
+            progress("Searching saved catalog…")
+            rows, total, info = self.index.search(normalized_query, language=language, offset=offset, generation=generation)
+        except CatalogIndexError as exc:
+            raise GutenbergCatalogError(str(exc)) from exc
+        books = tuple(GutenbergBook(
+            gutenberg_id=str(identity), title=title, authors=tuple(json.loads(authors)),
+            language=", ".join(codes.split(";")) if codes else "unknown",
+            rights=DEFAULT_RIGHTS_NOTICE, summary=subjects,
+            landing_url=f"https://www.gutenberg.org/ebooks/{identity}", acquisitions=(),
+            details_url=_canonical_detail_url(str(identity)), details_loaded=False,
+        ) for identity, title, authors, codes, subjects in rows)
+        next_url = None
+        if offset + len(books) < total:
+            next_url = "autoaudio-catalog:?" + urllib.parse.urlencode({
+                "query": normalized_query, "language": language, "offset": offset + PAGE_SIZE,
+                "generation": info["generation"],
+            })
+        return GutenbergSearchPage(books, next_url, total, tuple(info["languages"]),
+                                   info["catalog_date"], status.get("notice", ""))
 
     def load_book_details(self, book: GutenbergBook) -> GutenbergBook:
         if book.details_loaded:

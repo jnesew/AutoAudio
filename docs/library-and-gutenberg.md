@@ -38,25 +38,63 @@ starting a run creates its output directory. Local GUI drafts are stored separat
 
 ## Project Gutenberg search
 
-The discovery UI uses Project Gutenberg's official OPDS catalog endpoint rather than crawling website pages.
+**Find books** searches a saved copy of Project Gutenberg's official CSV catalog. The first explicit
+search downloads `pg_catalog.csv.gz` (roughly 6 MB) and builds a local SQLite index. Later searches,
+language filters, and **More results** use that index without contacting Gutenberg. Starting the app or
+opening the page does not download or refresh anything.
+
+Search matches all entered words across titles, credited authors/contributors, and subjects, ignoring
+case and diacritics. Enter a Gutenberg book ID to find that record directly. Results include author and
+language immediately, with exact titles and title prefixes ranked ahead of other matches. This ranking
+is local and does not reproduce Gutenberg's popularity order. Multilingual titles match each listed
+language; choose a language from the filter after the catalog has loaded. Results are shown 25 at a time.
+Non-text catalog records are excluded; EPUB availability is checked during review.
+
 The client follows these boundaries:
 
-- a search request occurs only when the user presses **Search** or Enter;
-- only one result page is requested, with **More results** providing explicit pagination;
-- search results remain lightweight; **Review & Download** requests the selected title's
-  OPDS detail feed so its contributors, language, rights, and acquisition formats can be shown;
-- no covers, related titles, unselected detail pages, speculative pages, or book files are prefetched;
-- repeated identical result pages are cached for the current application session;
+- a download/update check occurs during an explicit search when no usable catalog exists or the last
+  successful check was at least seven days ago;
+- refresh uses `If-Modified-Since` when Gutenberg supplies `Last-Modified`, so an unchanged catalog is
+  reused without downloading its body;
+- failed updates retain the previous index, display a notice, and wait at least an hour before retrying;
+  this backoff persists across restarts;
+- catalog replacement is atomic after decompression, CSV/schema validation, and database validation;
+  concurrent app instances coordinate refreshes and can continue reading the old snapshot;
+- **Review & Download** requests the selected title's OPDS detail feed for current contributors,
+  language, rights, and acquisition formats; these detail responses are cached for the session;
+- no covers, related titles, unselected detail pages, or book files are prefetched;
 - requests are rate-limited and use `AutoAudio/<version>` with the project repository as a contact URL;
-- OPDS and acquisition responses have strict size limits;
+- compressed catalogs, expanded CSV data, OPDS, and acquisition responses have strict size limits;
 - catalog and download URLs must use HTTPS on an allowed Project Gutenberg host;
 - XML document type and entity declarations are rejected;
 - downloaded data must validate as an EPUB container before atomic installation;
 - no bulk-selection or bulk-download action is provided.
 
-The current provider implements OPDS1 behind a catalog-provider boundary so a future OPDS2 implementation
-does not require UI changes. Project Gutenberg currently documents the OPDS entry point and has announced its
-intent to retire the existing XML feed in 2027.
+The CSV snapshot is published weekly. Search can work offline after the first download, using the last
+saved catalog if a refresh fails; the status line shows the catalog's date. Newly released books and
+metadata corrections appear after a successful refresh. An unsuccessful first download needs a connection
+and another explicit search. No online search fallback runs behind the scenes. Refreshing between result
+pages invalidates old pagination; repeat the search to use the new snapshot.
+
+### Catalog cache
+
+The index is stored outside book sources and output jobs and reused across application sessions:
+
+| Platform | Default directory |
+| --- | --- |
+| Linux and other Unix systems | `$XDG_CACHE_HOME/autoaudio/gutenberg`, normally `~/.cache/autoaudio/gutenberg` |
+| macOS | `~/Library/Caches/autoaudio/gutenberg` |
+| Windows | `%LOCALAPPDATA%/autoaudio/gutenberg` |
+
+Set `AUTOAUDIO_CATALOG_CACHE_DIR` to override the directory. It contains `catalog.sqlite3` and a small
+refresh-lock database. The index uses tens of megabytes; downloaded CSV data is not retained separately.
+To rebuild it, close AutoAudio and remove this cache directory, then run a search. Book files and saved
+conversion jobs are separate. The importer accepts up to 16 MiB compressed, 128 MiB expanded, and 250,000
+catalog rows, rejecting invalid/empty replacements while keeping a usable older index.
+
+Acquisition currently uses OPDS1 behind the catalog-provider boundary. Project Gutenberg has announced
+its intent to retire the existing XML feed in 2027; a future acquisition adapter will be needed when its
+replacement is available. Local CSV discovery is independent of that feed.
 
 References:
 
@@ -66,10 +104,12 @@ References:
 
 ## Explicit acquisition
 
-Selecting a result does not make another request or download it. **Review & Download** loads
-only that title's OPDS detail feed, merges its available editions, and then opens a confirmation containing
+Selecting a result does not make another request or download it. **Review & Download** uses the CSV's
+`Text#` book ID to load `https://www.gutenberg.org/ebooks/<id>.opds`, merges its available editions,
+and then opens a confirmation containing
 the specific title, contributors, language, preferred EPUB format, reported size, and catalog rights
-statement. The default answer is No. Only acceptance starts the EPUB request. EPUB3 with images is preferred
+statement. The default answer is No. Acceptance starts the EPUB request using the URL returned by the
+detail feed; download filenames and EPUB URLs are not guessed from the book ID. EPUB3 with images is preferred
 when offered, followed by other image-bearing EPUBs and then compatible fallbacks.
 
 The installed filename is `pg<gutenberg-id>.epub`. A neighboring
