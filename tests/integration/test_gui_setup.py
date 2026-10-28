@@ -66,6 +66,8 @@ def test_find_books_searches_locally_filters_language_and_reviews_one_title(setu
 
     window.catalog_client = GutenbergCatalogClient(cache_dir=tmp_path / "catalog", opener=opener,
                                                     minimum_request_interval=0)
+    preview = window._preview_result
+    preview_key = window._preview_key
     window.catalog_search_edit.setText("Homer")
     window.catalog_search_button.click()
     wait_until(lambda: window.catalog_thread is None)
@@ -77,6 +79,10 @@ def test_find_books_searches_locally_filters_language_and_reviews_one_title(setu
     assert window.catalog_tree.topLevelItemCount() == 1
     assert window.catalog_tree.topLevelItem(0).text(1) == "Homer"
     assert requests == [CATALOG_URL]
+    assert window._preview_result is preview
+    assert window._preview_key == preview_key
+    assert window.start_btn.isEnabled()
+    assert "catalog_language_combo" not in window._capture_controls()
 
     confirmation = Mock()
     monkeypatch.setattr(window, "_confirm_gutenberg_download", confirmation)
@@ -128,11 +134,26 @@ def test_initial_setup_finds_book_and_provider_changes_stay_offline(setup_window
     assert not window.resume_btn.isEnabled()
     assert not window.cancel_btn.isEnabled()
     assert window.watermark_device_combo.currentText() == "auto"
+    assert window.narrator_profile_combo.currentData() == "preset-aiden-neutral"
+    assert window.speaker_combo.currentText() == "Aiden"
+    assert window.language_edit.text() == "English"
     assert not window.windowIcon().isNull()
     assert not window.windowIcon().pixmap(32, 32).isNull()
     for provider in ("openai-compatible", "elevenlabs", "comfyui"):
         window.tts_provider_combo.setCurrentText(provider)
         assert window._collect_args(resume_mode="no").tts_provider == provider
+    network.assert_not_called()
+
+
+def test_saved_eric_draft_keeps_its_voice_after_default_change(setup_window):
+    window, network = setup_window
+    saved = window._capture_controls()
+    saved["narrator_profile_combo"] = "Eric — Neutral"
+    saved["speaker_combo"] = "Eric"
+    window._restore_controls(saved)
+    assert window.narrator_profile_combo.currentData() == "preset-eric-neutral"
+    assert window.speaker_combo.currentText() == "Eric"
+    assert window._collect_args(resume_mode="yes").narrator_profile == "preset-eric-neutral"
     network.assert_not_called()
 
 

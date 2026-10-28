@@ -18,6 +18,17 @@ from core.narrator import NarratorCatalog, NarratorProfileError
 CATALOG_PATH = PROJECT_ROOT / "resources" / "narrators" / "default_profiles.json"
 
 
+def test_cli_default_uses_native_english_aiden_profile():
+    from core.pipeline import build_argument_parser
+    from core.narration_selection import generation_settings
+
+    args = build_argument_parser(PROJECT_ROOT).parse_args([])
+    catalog = NarratorCatalog.load(CATALOG_PATH)
+    settings = generation_settings(args, catalog.get(args.narrator_profile))
+    assert settings.speaker == "Aiden"
+    assert settings.language == "English"
+
+
 def test_bundled_catalog_has_stable_preset_and_experimental_design_profiles():
     catalog = NarratorCatalog.load(CATALOG_PATH)
 

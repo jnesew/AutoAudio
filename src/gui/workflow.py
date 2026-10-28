@@ -476,6 +476,7 @@ class WorkflowMixin:
             "books_dir_edit",
             "library_output_root_edit",
             "catalog_search_edit",
+            "catalog_language_combo",
             "log_search",
             "provenance_password_edit",
         }

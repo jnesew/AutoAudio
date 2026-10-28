@@ -14,7 +14,7 @@ autoaudio \
   --output-dir /path/to/audiobook
 ```
 
-EPUB, TXT, Markdown, and RST are supported. The default narrator is the Eric preset and the default
+EPUB, TXT, Markdown, and RST are supported. The default narrator is the Aiden preset and the default
 output format is FLAC. Source checkouts may also use `python auto_audiobook.py` with the same arguments.
 
 ## Choose a narrator and format

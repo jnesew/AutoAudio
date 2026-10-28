@@ -786,7 +786,7 @@ def build_argument_parser(project_root: Path) -> argparse.ArgumentParser:
         default=DEFAULT_CHAPTER_GAP_MS,
         help="Lossless silence inserted between chapters in part files (0 disables).",
     )
-    parser.add_argument("--narrator-profile", default="preset-eric-neutral")
+    parser.add_argument("--narrator-profile", default="preset-aiden-neutral")
     parser.add_argument(
         "--speaker",
         choices=QWEN_PRESET_SPEAKERS,

@@ -524,9 +524,13 @@ class MainWindow(WorkflowMixin, QMainWindow):
         self.narrator_profile_combo = QComboBox()
         for profile in self.narrator_catalog.profiles:
             self.narrator_profile_combo.addItem(profile.name, profile.id)
+        default_profile = self.narrator_catalog.get(self.default_args.narrator_profile)
+        self.narrator_profile_combo.setCurrentIndex(
+            self.narrator_profile_combo.findData(default_profile.id)
+        )
         self.narrator_detail = QLabel()
         self.narrator_detail.setWordWrap(True)
-        self.speaker_combo = combo(QWEN_PRESET_SPEAKERS, "Eric")
+        self.speaker_combo = combo(QWEN_PRESET_SPEAKERS, default_profile.settings.speaker)
         self.voice_instruct_edit = QLineEdit()
         self.model_choice_combo = combo(QWEN_MODEL_CHOICES_BY_MODE["preset"], "1.7B")
         self.device_edit = QLineEdit()

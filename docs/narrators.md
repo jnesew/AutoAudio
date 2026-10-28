@@ -21,19 +21,26 @@ No narrator setting accepts, uploads, or caches reference-voice audio.
 
 The narrator dropdown contains a neutral long-form profile for every built-in CustomVoice speaker:
 
-| Profile ID | Display name | Qwen speaker |
-|---|---|---|
-| `preset-eric-neutral` | Eric — Neutral | `Eric` |
-| `preset-aiden-neutral` | Aiden — Clear | `Aiden` |
-| `preset-dylan-neutral` | Dylan — Natural | `Dylan` |
-| `preset-ono-anna-neutral` | Ono Anna — Light | `Ono_anna` |
-| `preset-ryan-neutral` | Ryan — Dynamic | `Ryan` |
-| `preset-serena-neutral` | Serena — Warm | `Serena` |
-| `preset-sohee-neutral` | Sohee — Expressive | `Sohee` |
-| `preset-uncle-fu-neutral` | Uncle Fu — Low | `Uncle_fu` |
-| `preset-vivian-neutral` | Vivian — Bright | `Vivian` |
+| Profile ID | Display name | Qwen speaker | Native language |
+|---|---|---|---|
+| `preset-aiden-neutral` | Aiden — Clear (default) | `Aiden` | English (American) |
+| `preset-eric-neutral` | Eric — Neutral | `Eric` | Chinese (Sichuan dialect) |
+| `preset-dylan-neutral` | Dylan — Natural | `Dylan` | Chinese (Beijing dialect) |
+| `preset-ono-anna-neutral` | Ono Anna — Light | `Ono_anna` | Japanese |
+| `preset-ryan-neutral` | Ryan — Dynamic | `Ryan` | English |
+| `preset-serena-neutral` | Serena — Warm | `Serena` | Chinese |
+| `preset-sohee-neutral` | Sohee — Expressive | `Sohee` | Korean |
+| `preset-uncle-fu-neutral` | Uncle Fu — Low | `Uncle_fu` | Chinese |
+| `preset-vivian-neutral` | Vivian — Bright | `Vivian` | Chinese |
 
-`preset-eric-neutral` remains the default. Profiles are packaged in `default_profiles.json` and lock the complete generation configuration used for checkpoint compatibility.
+`preset-aiden-neutral` is the default for new jobs. Ryan is another native English option. Qwen supports
+cross-language speech but recommends each speaker's native language for best quality; see its
+[official speaker list](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice#supported-speakers).
+
+Profiles are packaged in `default_profiles.json` and lock the complete generation configuration used for
+checkpoint compatibility. Existing profile definitions and hashes are unchanged. Saved drafts retain their
+selected voice; use **Restore saved run settings** before resuming an older GUI job. For an older CLI job
+that used the previous default, pass `--narrator-profile preset-eric-neutral` with its original settings.
 
 ## Designed voice profile
 

@@ -7,6 +7,7 @@ autoaudio --gui
 ```
 
 Follow **Book → Voice → Preview → Output** to review narration and create an audiobook.
+The screenshots use an example book and generic local folders.
 
 ### Linux application launcher
 
@@ -29,6 +30,10 @@ association; see [Qt's desktop-file guidance](https://doc.qt.io/qt-6/qguiapplica
 draft or resume a previous run. You can change the source directory and output root, or browse to a
 manual file on **Book**.
 
+![Library with a selected example book and one queued conversion](images/gui/library.png)
+
+The queue captures the voice, format, and destination when a job is added. **Run queue** starts it.
+
 **Find books** searches a saved Gutenberg catalog by title, author, subject, or book ID. The first search
 downloads the catalog (roughly 6 MB); subsequent searches and **More results** work locally. Choose a
 language from the filter after the catalog loads. The status line shows its date and any refresh problem.
@@ -38,15 +43,24 @@ Select a result and choose **Review & Download** to fetch its current formats an
 EPUB download. See [Library and book downloads](library-and-gutenberg.md) for cache locations, refresh
 behavior, and copyright information.
 
+![Local Gutenberg search results filtered to English, with author and language columns populated](images/gui/find-books.png)
+
 ## Book and voice
 
 Select a source from **Library** or browse to a manual file on **Book**. Inspect its local metadata;
 expand the parsing and pronunciation controls when you need to change chapter grouping or replacements.
 
+![Book page showing the source file, parsed metadata, and expandable text preparation controls](images/gui/book.png)
+
 On **Voice**, choose a provider, its endpoint, and a voice. Qwen profiles and built-in speakers are listed
 for ComfyUI; HTTP providers use an existing voice ID. Advanced Qwen settings include seed, precision,
 sampling, model size, and the TTS device on the external server. See [Narrators](narrators.md) and
 [TTS providers](tts-providers.md).
+
+New Qwen jobs default to **Aiden — Clear**, a native English voice. Saved drafts keep their selected
+narrator; use **Restore saved run settings** when continuing an existing conversion.
+
+![Voice page with the default Aiden narrator, English language, and measured audiobook delivery](images/gui/voice.png)
 
 ## Preview and samples
 
@@ -54,6 +68,8 @@ sampling, model size, and the TTS device on the external server. See [Narrators]
 individual speech requests. Review front matter and the expandable omission/parser diagnostics before
 converting. Uncheck chapters to exclude them, or edit spoken text and press **Apply chapter edit**.
 Edits apply after replacement rules, so editing a replaced word does not trigger another substitution.
+
+![Preview showing included chapters, editable spoken text, exact request text, and short sample controls](images/gui/preview.png)
 
 Pending chapter edits block generation until applied or discarded with **Use parsed text**. Pending
 editor text is saved in the draft. Chapter choices use one-based numbers from the grouped plan; after
@@ -72,6 +88,8 @@ is unavailable. Changing settings or the selected sample text invalidates playba
 
 Choose an output folder, format, and local watermark device on **Output**. Audio spacing and optional
 C2PA signing settings are expandable. **Convert book** processes the included narration plan.
+
+![Output page with the export folder, FLAC format, local watermark device, and optional spacing and signing controls](images/gui/output.png)
 
 **Check local setup** reports ffmpeg/ffprobe availability and the installed PyTorch accelerator support.
 It shows the effective watermark device request, including an environment override. The TTS device
