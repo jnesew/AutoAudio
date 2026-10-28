@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -49,10 +50,11 @@ def test_process_segment_sends_only_narration_text(tmp_path):
     assert CHAPTER_DISCLOSURE_TEXT not in provider.calls[0]["text_segment"]
 
 
-def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_path):
+@pytest.mark.parametrize("policy", ["chapter-disclosure-v1", "chapter-disclosure-v2"])
+def test_disclosure_is_generated_once_and_checkpointed_with_its_policy(tmp_path, policy):
     state_dir = tmp_path / ".autoaudio_state"
     store = CheckpointStore(state_dir)
-    checkpoint = {"version": 2, "artifacts": {}}
+    checkpoint = {"version": 2, "artifacts": {}, "disclosure_policy_version": policy}
     provider = RecordingProvider()
     marking = SimpleNamespace(applied=True, verified=True, detail="verified")
 
@@ -76,6 +78,7 @@ def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_pat
         "core.pipeline.subprocess.run", side_effect=fake_encode
     ):
         first = ensure_disclosure_asset(**call_args)
+        call_args["checkpoint"] = store.load()
         second = ensure_disclosure_asset(**call_args)
 
     assert first == second
@@ -83,5 +86,17 @@ def test_disclosure_is_generated_once_with_fixed_preset_and_checkpointed(tmp_pat
     assert provider.calls[0]["text_segment"] == CHAPTER_DISCLOSURE_TEXT
     assert provider.calls[0]["purpose"] == "disclosure"
     assert watermark.call_args.kwargs["device"] == "cpu"
-    assert checkpoint["artifacts"]["disclosure"]["policy_version"] == "chapter-disclosure-v1"
+    assert checkpoint["artifacts"]["disclosure"]["policy_version"] == policy
     assert Path(checkpoint["artifacts"]["disclosure"]["manifest_path"]).exists()
+
+
+@pytest.mark.parametrize("checkpoint", [
+    {"disclosure_policy_version": "unknown"},
+    {"disclosure_policy_version": []},
+    {"disclosure_policy_version": "chapter-disclosure-v2", "artifacts": {"disclosure": {"policy_version": "chapter-disclosure-v1"}}},
+])
+def test_unknown_or_conflicting_disclosure_policy_is_rejected(checkpoint):
+    from core.pipeline import _disclosure_policy_for_checkpoint
+    from core.errors import ResumeStateError
+    with pytest.raises(ResumeStateError):
+        _disclosure_policy_for_checkpoint(checkpoint)

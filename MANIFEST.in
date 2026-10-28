@@ -4,6 +4,7 @@ include THIRD_PARTY_DEPENDENCIES.md
 recursive-include docs *.md
 recursive-include docs/images *.png
 recursive-include examples *.json
+recursive-include examples *.txt
 recursive-include LICENSES *
 recursive-include resources *.json
 recursive-include resources/icons *.png

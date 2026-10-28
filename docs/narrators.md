@@ -42,6 +42,10 @@ checkpoint compatibility. Existing profile definitions and hashes are unchanged.
 selected voice; use **Restore saved run settings** before resuming an older GUI job. For an older CLI job
 that used the previous default, pass `--narrator-profile preset-eric-neutral` with its original settings.
 
+New jobs use the selected narration voice for the chapter disclosure as well, with neutral delivery for
+preset voices. Resumed jobs retain their saved disclosure policy and audio. See
+[chapter disclosure](provenance-and-resume.md#chapter-disclosure).
+
 ## Designed voice profile
 
 `design-warm-narrator` provides the bundled VoiceDesign starting point. Its instruction requests a warm adult audiobook narrator with a steady register, clear diction, natural pacing, and restrained emotion.

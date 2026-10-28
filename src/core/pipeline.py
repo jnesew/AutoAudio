@@ -9,6 +9,7 @@ import re
 import signal
 import subprocess
 import traceback
+from dataclasses import replace
 from collections.abc import Callable
 from pathlib import Path
 
@@ -130,10 +131,45 @@ from tts import (
 
 
 CHAPTER_DISCLOSURE_TEXT = "This audio was generated synthetically with AutoAudio."
-CHAPTER_DISCLOSURE_POLICY_VERSION = "chapter-disclosure-v1"
+LEGACY_CHAPTER_DISCLOSURE_POLICY_VERSION = "chapter-disclosure-v1"
+CHAPTER_DISCLOSURE_POLICY_VERSION = "chapter-disclosure-v2"
 DEFAULT_DISCLOSURE_GAP_MS = 700
 DEFAULT_SEGMENT_GAP_MS = 150
 DEFAULT_CHAPTER_GAP_MS = 1000
+
+
+def _disclosure_policy_for_checkpoint(checkpoint: dict | None) -> str:
+    """Keep older jobs on v1, including pauses before their first disclosure."""
+    if checkpoint is None:
+        return CHAPTER_DISCLOSURE_POLICY_VERSION
+    artifacts = checkpoint.get("artifacts", {})
+    if not isinstance(artifacts, dict) or not isinstance(artifacts.get("disclosure", {}), dict):
+        raise ResumeStateError("The saved disclosure record is invalid; existing work was preserved.")
+    record_policy = artifacts.get("disclosure", {}).get("policy_version")
+    policy = checkpoint.get("disclosure_policy_version", record_policy or LEGACY_CHAPTER_DISCLOSURE_POLICY_VERSION)
+    if not isinstance(policy, str) or policy not in {LEGACY_CHAPTER_DISCLOSURE_POLICY_VERSION, CHAPTER_DISCLOSURE_POLICY_VERSION}:
+        raise ResumeStateError("The saved disclosure policy is unsupported; existing work was preserved.")
+    if record_policy is not None and record_policy != policy:
+        raise ResumeStateError("The saved disclosure policy conflicts with its artifact; existing work was preserved.")
+    return policy
+
+
+def _disclosure_generation_settings(settings: GenerationSettings, policy: str) -> GenerationSettings:
+    """Preserve the voice identity; preset delivery can be neutralized separately."""
+    if policy == LEGACY_CHAPTER_DISCLOSURE_POLICY_VERSION:
+        return GenerationSettings(
+            voice_mode="preset", speaker="Eric",
+            instruct="Use a neutral, clear announcement voice with steady pacing.",
+            model_choice="1.7B", device="auto", precision="bf16", language="English",
+            seed=268583702137267, max_new_tokens=2048, top_p=0.8, top_k=20,
+            temperature=1.0, repetition_penalty=1.05, attention="sdpa",
+            unload_model_after_generate=False,
+        )
+    if settings.voice_mode == "preset":
+        return replace(settings, instruct="Use a neutral, clear announcement voice with steady pacing.")
+    # VoiceDesign's instruction defines the identity, not just delivery. Keep it
+    # intact so disclosure uses the same description as the narration segments.
+    return settings
 
 
 def extract_text_blocks_from_epub(
@@ -394,6 +430,7 @@ def ensure_disclosure_asset(
 ) -> str:
     if cancellation:
         cancellation.raise_if_cancelled()
+    disclosure_policy = _disclosure_policy_for_checkpoint(checkpoint)
     state_dir.mkdir(parents=True, exist_ok=True)
     disclosure = checkpoint.setdefault("artifacts", {}).setdefault("disclosure", {})
     manifest_path = disclosure.get("manifest_path", "")
@@ -421,7 +458,7 @@ def ensure_disclosure_asset(
         )
 
     output_path = state_dir / "chapter_disclosure.flac"
-    content_id = "autoaudio_chapter_disclosure_v1"
+    content_id = "autoaudio_" + disclosure_policy.replace("-", "_")
     if phase_callback:
         phase_callback("Watermarking disclosure")
     write_watermarked_audio_artifact(
@@ -438,7 +475,7 @@ def ensure_disclosure_asset(
         "sha256": sha256_file(output_path),
         "manifest_path": str(sidecar_path),
         "manifest_sha256": sha256_file(sidecar_path),
-        "policy_version": CHAPTER_DISCLOSURE_POLICY_VERSION,
+        "policy_version": disclosure_policy,
         "text_sha256": hashlib.sha256(
             CHAPTER_DISCLOSURE_TEXT.encode("utf-8")
         ).hexdigest(),
@@ -1033,23 +1070,18 @@ def _run_pipeline(
     except NarratorProfileError as exc:
         raise InputValidationError(f"Invalid narrator profile: {exc}") from exc
 
-    disclosure_settings = GenerationSettings(
-        voice_mode="preset",
-        speaker="Eric",
-        instruct="Use a neutral, clear announcement voice with steady pacing.",
-        model_choice="1.7B",
-        device="auto",
-        precision="bf16",
-        language="English",
-        seed=268583702137267,
-        max_new_tokens=2048,
-        top_p=0.8,
-        top_k=20,
-        temperature=1.0,
-        repetition_penalty=1.05,
-        attention="sdpa",
-        unload_model_after_generate=False,
-    )
+    checkpoint_store = CheckpointStore(state_dir=state_dir)
+    plan_store = BookPlanStore(state_dir=state_dir)
+    checkpoint = None
+    checkpoint_load_error: CheckpointError | None = None
+    try:
+        checkpoint = checkpoint_store.load()
+    except CheckpointError as exc:
+        checkpoint_load_error = exc
+        logger.warning("Ignoring incompatible checkpoint for non-forced resume: %s", exc)
+    disclosure_policy = _disclosure_policy_for_checkpoint(checkpoint)
+    disclosure_settings = _disclosure_generation_settings(settings, disclosure_policy)
+    logger.info("Chapter disclosure policy=%s", disclosure_policy)
     try:
         segment_policy = segment_policy_for(args, settings)
         chapter_choices = selection_payload(args)
@@ -1061,15 +1093,15 @@ def _run_pipeline(
         workflow_path = config.workflow_path_for(settings.voice_mode)
         workflow_template = load_workflow_template(workflow_path)
         narration_workflow_hash = sha256_file(workflow_path)
-        disclosure_workflow_path = config.workflow_path_for("preset")
+        disclosure_workflow_path = config.workflow_path_for(disclosure_settings.voice_mode)
         disclosure_workflow_template = (
             workflow_template
             if disclosure_workflow_path == workflow_path
             else load_workflow_template(disclosure_workflow_path)
         )
         disclosure_workflow_hash = sha256_file(disclosure_workflow_path)
-        # Preserve the exact v2 ComfyUI compatibility identity so existing
-        # incomplete default-provider checkpoints remain resumable.
+        # Keep the original hash shape; legacy jobs retain their preset
+        # disclosure workflow and remain resumable.
         workflow_hash = stable_settings_hash(
             {
                 "narration_workflow_sha256": narration_workflow_hash,
@@ -1092,8 +1124,6 @@ def _run_pipeline(
     if config.tts.provider != "comfyui":
         workflow_hash = stable_settings_hash(speech_provider.identity.compatibility)
     provenance_runtime_metadata = _provider_provenance_runtime_metadata(speech_provider)
-    checkpoint_store = CheckpointStore(state_dir=state_dir)
-    plan_store = BookPlanStore(state_dir=state_dir)
     try:
         input_hash = sha256_file(input_book)
     except OSError as exc:
@@ -1130,7 +1160,7 @@ def _run_pipeline(
         "repetition_penalty": settings.repetition_penalty,
         "attention": settings.attention,
         "unload_model_after_generate": settings.unload_model_after_generate,
-        "chapter_disclosure_policy": CHAPTER_DISCLOSURE_POLICY_VERSION,
+        "chapter_disclosure_policy": disclosure_policy,
         "chapter_disclosure_text": CHAPTER_DISCLOSURE_TEXT,
         "audio_assembly_policy": AUDIO_ASSEMBLY_POLICY_VERSION,
         "ai_marking_schema": AI_MARKING_COMPATIBILITY_SCHEMA,
@@ -1162,16 +1192,6 @@ def _run_pipeline(
             }
         )
     settings_hash = stable_settings_hash(settings_identity)
-    checkpoint = None
-    checkpoint_load_error: CheckpointError | None = None
-    try:
-        checkpoint = checkpoint_store.load()
-    except CheckpointError as exc:
-        checkpoint_load_error = exc
-        logger.warning(
-            "Ignoring incompatible checkpoint for non-forced resume: %s", exc
-        )
-
     can_resume = (
         checkpoint
         and checkpoint.get("status") in {"running", "failed", "cancelled"}
@@ -1396,6 +1416,7 @@ def _run_pipeline(
                 "resume_mode": args.resume,
             },
         )
+        checkpoint["disclosure_policy_version"] = disclosure_policy
         checkpoint_store.save(checkpoint)
 
     print(f"--- Processing Book: {input_book} ---")

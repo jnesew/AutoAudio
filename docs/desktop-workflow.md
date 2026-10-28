@@ -81,6 +81,8 @@ plus the fixed audible AI disclosure. It uses the normal provider and verified A
 FLAC output at `audiobook_output/.samples/<random-id>/audio/`. It does not convert the whole source.
 The current text adapter omits excerpts of 20 characters or fewer, so select a longer segment for a sample.
 
+For a longer public demo, see [Preparing a README narration sample](media/README.md).
+
 **Play sample** plays the result using QtMultimedia, or opens it externally if that optional Qt module
 is unavailable. Changing settings or the selected sample text invalidates playback for the current draft.
 

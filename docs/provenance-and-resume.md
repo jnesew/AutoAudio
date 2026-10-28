@@ -2,7 +2,19 @@
 
 ## Chapter disclosure
 
-At the beginning of a job, AutoAudio generates and checkpoints one neutral disclosure asset through the selected provider. ComfyUI uses its stable preset workflow; OpenAI-compatible endpoints receive a neutral announcement instruction; ElevenLabs uses the selected existing voice. The same verified asset is placed exactly once at the beginning of every produced chapter. Narration text itself never contains disclosure or pause tokens.
+At the beginning of a new job, AutoAudio generates and checkpoints one disclosure asset through the
+selected provider and narration voice. ComfyUI presets use the selected speaker and generation settings
+with a neutral announcement instruction. VoiceDesign uses the same workflow, description, and settings
+as narration; its independent generations can still vary in vocal identity. OpenAI-compatible endpoints
+receive the selected model/voice with a neutral instruction; ElevenLabs uses the selected model/voice.
+HTTP-provider disclosure never requires ComfyUI.
+
+The same verified asset is placed exactly once at the beginning of every produced chapter. Narration
+text itself never contains disclosure or pause tokens. New jobs record `chapter-disclosure-v2` in their
+compatibility identity and checkpoint. Resuming a job preserves its saved policy and verified disclosure.
+Older jobs with `chapter-disclosure-v1`, including those interrupted before generating the first asset,
+retain the fixed Eric preset for ComfyUI and the original compatibility hashes. Choose a new output
+directory to start an older book with the new disclosure voice policy.
 
 ## AudioSeal marking
 

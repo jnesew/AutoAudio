@@ -115,6 +115,7 @@ def test_openai_compatible_disclosure_uses_neutral_instruction():
     provider = OpenAICompatibleSpeechProvider(
         TTSConfig(
             provider="openai-compatible",
+            base_url="https://speech.example/v1",
             model="speech-model",
             voice="reader",
             response_format="mp3",
@@ -128,6 +129,9 @@ def test_openai_compatible_disclosure_uses_neutral_instruction():
     )
 
     payload = json.loads(requests[0].data)
+    assert requests[0].full_url == "https://speech.example/v1/audio/speech"
+    assert payload["model"] == "speech-model"
+    assert payload["voice"] == "reader"
     assert payload["instructions"] == "Use a neutral, clear announcement voice with steady pacing."
 
 
@@ -140,7 +144,8 @@ def test_openai_compatible_voice_discovery_is_not_invented():
         provider.discover_voices()
 
 
-def test_elevenlabs_generation_uses_existing_voice_without_clone_inputs(monkeypatch):
+@pytest.mark.parametrize("purpose", ["narration", "disclosure"])
+def test_elevenlabs_generation_uses_existing_voice_without_clone_inputs(monkeypatch, purpose):
     requests = []
 
     def urlopen(request, *, timeout):
@@ -162,7 +167,7 @@ def test_elevenlabs_generation_uses_existing_voice_without_clone_inputs(monkeypa
         urlopen=urlopen,
     )
 
-    provider.generate_audio(text_segment="Hyvää huomenta.")
+    provider.generate_audio(text_segment="Hyvää huomenta.", purpose=purpose)
 
     request = requests[0]
     assert request.full_url == (
