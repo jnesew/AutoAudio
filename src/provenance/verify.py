@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -139,6 +140,21 @@ def verify_artifact(artifact: Path) -> tuple[bool, list[str]]:
     return (not errors), errors
 
 
+def _same_evidence(left, right) -> bool:
+    """Allow one binary64 serialization step without relaxing payload identity."""
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(_same_evidence(left[key], right[key]) for key in left)
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(_same_evidence(a, b) for a, b in zip(left, right))
+    if type(left) is float and type(right) is float:
+        # C2PA's JSON rendering can shift a stored metric by one representable
+        # step. Signed evidence remains authoritative for all subsequent checks.
+        return math.isfinite(left) and math.isfinite(right) and (
+            left == right or math.nextafter(left, right) == right
+        )
+    return type(left) is type(right) and left == right
+
+
 def inspect_artifact(
     artifact: Path, *, check_signal=False, check_signature=False, require_trusted=False,
     tool="c2patool", trust_anchors=None, device="cpu",
@@ -178,7 +194,7 @@ def inspect_artifact(
             if signature["signature"] != "valid" or signature["binding"] != "valid":
                 errors.append("C2PA signature or asset binding is absent or invalid.")
             elif signed:
-                if evidence and evidence != signed:
+                if evidence and not _same_evidence(evidence, signed):
                     errors.append("Sidecar watermark evidence differs from the signed C2PA record.")
                 evidence = signed
                 report["evidence_source"] = "signed-c2pa"

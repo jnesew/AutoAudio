@@ -34,6 +34,9 @@ providers, offline book discovery, and stronger verification and recovery.
   prove synthetic origin or signer identity.
 - Truncated HTTP responses and broken chunk framing produce provider connection errors. Ambiguous
   synthesis failures are not automatically resubmitted, avoiding duplicate generation or charges.
+- Signed-evidence comparisons tolerate a single floating-point serialization step in numeric metrics,
+  preventing false sidecar conflicts after C2PA JSON round-tripping. Payload identities and sample
+  timelines still require exact agreement.
 - Dependency advisory fixes, packaging improvements, and consolidated documentation are included.
 
 ## Upgrading and compatibility

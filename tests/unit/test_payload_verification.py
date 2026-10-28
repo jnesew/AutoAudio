@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -265,6 +267,35 @@ def test_sidecar_cannot_override_the_signed_expected_payload(monkeypatch, tmp_pa
     marked(artifact, record())
     different = {**record(), "expected_bits": "10" * 8}
     monkeypatch.setattr("provenance.signature.inspect_signature", lambda *_a, **_k: parse_signature_report(signature_report(different)))
+    monkeypatch.setattr("provenance.verify._probe_tags", lambda *_: {**AI_TAGS, "ai_marking": "audio_watermark", "ai_provider": "ComfyUI"})
+    result = inspect_artifact(artifact, check_signature=True)
+    assert not result["checks_passed"]
+    assert any("differs from the signed" in error for error in result["errors"])
+
+
+@pytest.mark.parametrize("steps,accepted", [(1, True), (-1, True), (2, False), (-2, False)])
+def test_signed_metric_json_roundtrip_allows_only_one_float_step(monkeypatch, tmp_path, steps, accepted):
+    artifact = tmp_path / "signed.flac"
+    payload = {**record(), "generation_verification": {"presence_score": 0.9975879788398743, "bit_errors": 0}}
+    marked(artifact, payload)
+    signed = copy.deepcopy(payload)
+    for _ in range(abs(steps)):
+        signed["generation_verification"]["presence_score"] = math.nextafter(
+            signed["generation_verification"]["presence_score"], math.inf if steps > 0 else -math.inf,
+        )
+    monkeypatch.setattr("provenance.signature.inspect_signature", lambda *_a, **_k: parse_signature_report(signature_report(signed)))
+    monkeypatch.setattr("provenance.verify._probe_tags", lambda *_: {**AI_TAGS, "ai_marking": "audio_watermark", "ai_provider": "ComfyUI"})
+    result = inspect_artifact(artifact, check_signature=True)
+    assert result["checks_passed"] is accepted
+    assert result["evidence_source"] == "signed-c2pa"
+
+
+@pytest.mark.parametrize("change", [{"start_sample": 1}, {"sample_count": 2401}, {"expected_bits": "10" * 8}])
+def test_signed_payload_identity_and_timeline_still_require_exact_agreement(monkeypatch, tmp_path, change):
+    artifact = tmp_path / "signed.flac"
+    marked(artifact, record())
+    signed = {**record(), **change}
+    monkeypatch.setattr("provenance.signature.inspect_signature", lambda *_a, **_k: parse_signature_report(signature_report(signed)))
     monkeypatch.setattr("provenance.verify._probe_tags", lambda *_: {**AI_TAGS, "ai_marking": "audio_watermark", "ai_provider": "ComfyUI"})
     result = inspect_artifact(artifact, check_signature=True)
     assert not result["checks_passed"]
