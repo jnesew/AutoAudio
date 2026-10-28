@@ -4,6 +4,12 @@ The [published sample](narration-demo%20-%20Part_001.mp3) is a 37-second English
 passage using Qwen3-TTS 1.7B and Aiden, including the audible disclosure. Its
 [verification record](narration-demo%20-%20Part_001.mp3.ai.json) retains the expected AudioSeal payloads.
 
+The [video preview](narration-sample.mp4) pairs the same passage with a
+[static cover](narration-sample-cover.png). It uses H.264 video and AAC audio and is under 0.5 MB.
+Both AudioSeal messages were recovered exactly from the final AAC waveform; its
+[verification record](narration-sample.mp4.ai.json) links it to the original MP3.
+The MP3 remains the original audio download.
+
 Keep curated public demo clips here. Generate the clip separately from normal library jobs, which remain
 under the ignored `audiobook_output/` directory.
 
@@ -38,8 +44,26 @@ Add a **Listen to a narration sample** link near the README's opening paragraph,
 the clip exists. Label the sample with its provider, model, voice, language, and source text; for example,
 “Qwen3-TTS 1.7B · Aiden · English · bundled demo passage.” This makes clear which setup the clip represents.
 
-For an inline GitHub player, an MP4 with a static cover/title image and the audio is another option.
+For an inline GitHub player:
+
+1. Open the repository's `README.md` on GitHub and choose **Edit**.
+2. Drag `docs/media/narration-sample.mp4` into the editor, or use its attachment control.
+3. Wait for the upload to finish. Replace the **Listen to a narration sample** link with the returned
+   attachment URL on its own line, with a blank line before and after it. Keep the sample description
+   and MP3 download link below it.
+4. Check **Preview** for the player and test playback before saving.
+
+The attachment uploads immediately. To keep the README change in your local Git workflow, copy the
+returned URL into the local README, discard the browser edit, then commit and push normally.
+
 GitHub documents video attachment support and recommends H.264 for compatibility; see
 [attaching media](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files).
-Use the uploaded video URL in the README. Retain the original MP3 and sidecar alongside that listening
-preview; wrapping audio in a new video container does not transfer its original C2PA signature.
+Retain the original MP3 and sidecar alongside the listening preview; converting audio to a new video
+container does not transfer an original C2PA signature.
+
+To check either published file locally:
+
+```bash
+autoaudio-verify --file 'docs/media/narration-demo - Part_001.mp3' --check-signal
+autoaudio-verify --file docs/media/narration-sample.mp4 --check-signal
+```

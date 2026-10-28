@@ -3,8 +3,9 @@
 AutoAudio converts EPUB, TXT, Markdown, and RST books into audiobooks using ComfyUI with Qwen3-TTS,
 OpenAI-compatible speech providers, or ElevenLabs. Use the desktop app or command line.
 
-[Listen to a narration sample](docs/media/narration-demo%20-%20Part_001.mp3)
+[Listen to a narration sample](docs/media/narration-sample.mp4)
 (37 seconds, Qwen3-TTS 1.7B / Aiden, English).
+[Download the MP3](docs/media/narration-demo%20-%20Part_001.mp3).
 
 ## Features
 
