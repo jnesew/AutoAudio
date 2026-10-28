@@ -130,6 +130,12 @@ incompatible recovery files; use a fresh output directory to start a v2 conversi
 
 The parser policy, narrator profile content, output rules, selected provider, endpoint, model, voice, response format, language code, and AI-marking schema contribute to the effective settings identity where applicable. The API-key environment-variable name is checkpointed, but its value is never persisted. This prevents a job from silently mixing artifacts produced under incompatible behavior.
 
+For CLI resumes after upgrading AutoAudio, retain the original `--provenance-claim-generator` value
+from the checkpoint's `ui_state`, even when signing is disabled. Its default includes the application
+version, and it contributes to the settings identity. For example, a job started with the default
+in 2.0.0 needs `--provenance-claim-generator AutoAudio/2.0.0` along with its other original settings.
+The GUI restores this field from saved job settings.
+
 ## Per-title library state
 
 The GUI identifies a local source by its SHA-256 digest and assigns it a deterministic directory named
